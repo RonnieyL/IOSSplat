@@ -538,14 +538,56 @@ extension Renderer {
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let exportURL = documentsURL.appendingPathComponent(currentScanFolderName)
         
-        // Create empty points3D.txt (or export sparse point cloud if desired)
-        let pointsURL = exportURL.appendingPathComponent("sparse/0/points3D.txt")
-        let emptyPointsData = "# 3D point list with one line of data per point:\n# POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID POINT2D_IDX)\n".data(using: .utf8)
-        try? emptyPointsData?.write(to: pointsURL)
+        // Export actual point cloud data to points3D.txt
+        exportPointCloudData(to: exportURL)
         
         print("COLMAP data exported to: \(exportURL.path)")
         print("Total extracted frames: \(extractedFrameCounter)")
+        print("Total point cloud points: \(cpuParticlesBuffer.count)")
+        print("High confidence points: \(highConfCount)")
         print("Files accessible in iOS Files app under: \(currentScanFolderName)")
+    }
+    
+    private func exportPointCloudData(to baseURL: URL) {
+        let pointsURL = baseURL.appendingPathComponent("sparse/0/points3D.txt")
+        
+        // COLMAP points3D.txt format:
+        // POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID POINT2D_IDX)
+        // We'll use a simplified format with minimal track info
+        
+        var pointsContent = "# 3D point list with one line of data per point:\n"
+        pointsContent += "# POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID POINT2D_IDX)\n"
+        
+        var pointID = 0
+        for particle in cpuParticlesBuffer {
+            // Only export high-confidence points (confidence level 2)
+            if particle.confidence >= 2 {
+                let pos = particle.position
+                let color = particle.color
+                
+                // Convert color from 0-255 float to 0-255 int
+                let red = max(0, min(255, Int(color.x)))
+                let green = max(0, min(255, Int(color.y)))
+                let blue = max(0, min(255, Int(color.z)))
+                
+                // Format: POINT3D_ID X Y Z R G B ERROR TRACK[]
+                // Using error = 1.0 as default, empty track for simplicity
+                let pointLine = "\(pointID) \(pos.x) \(pos.y) \(pos.z) \(red) \(green) \(blue) 1.0\n"
+                pointsContent += pointLine
+                
+                pointID += 1
+            }
+        }
+        
+        // Write to file
+        if let data = pointsContent.data(using: .utf8) {
+            do {
+                try data.write(to: pointsURL)
+                print("Exported \(pointID) high-confidence points to points3D.txt")
+            } catch {
+                print("Failed to write points3D.txt: \(error)")
+            }
+        }
     }
 }
 
