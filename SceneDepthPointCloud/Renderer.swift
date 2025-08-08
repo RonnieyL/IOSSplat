@@ -23,14 +23,14 @@ final class Renderer {
     // Particle's size in pixels
     private let particleSize: Float = 8
     
-    // Data processing frame rate control
-    var dataProcessingFPS: Double = 3.0 {
+    // LiDAR/Point cloud processing frame rate control
+    var lidarProcessingFPS: Double = 3.0 {
         didSet {
-            dataProcessingInterval = 1.0 / dataProcessingFPS
+            lidarProcessingInterval = 1.0 / lidarProcessingFPS
         }
     }
-    private var dataProcessingInterval: TimeInterval = 1.0 / 3.0
-    private var lastDataProcessingTime: TimeInterval = 0
+    private var lidarProcessingInterval: TimeInterval = 1.0 / 3.0
+    private var lastLidarProcessingTime: TimeInterval = 0
     // We only use portrait orientation in this app
     private let orientation = UIInterfaceOrientation.portrait
     // Camera's threshold values for detecting when the camera moves so that we can accumulate the points
@@ -192,21 +192,16 @@ final class Renderer {
             }
         }
 
-        // Check if we should process data this frame (throttled)
-        let shouldProcessData = shouldProcessDataThisFrame(currentFrame)
-        
-        if shouldProcessData {
-            // update frame data
-            update(frame: currentFrame)
-            updateCapturedImageTextures(frame: currentFrame)
-        }
+        // Always update frame data and camera textures for smooth camera feed
+        update(frame: currentFrame)
+        updateCapturedImageTextures(frame: currentFrame)
 
         // handle buffer rotating
         currentBufferIndex = (currentBufferIndex + 1) % maxInFlightBuffers
         pointCloudUniformsBuffers[currentBufferIndex][0] = pointCloudUniforms
 
-        // Only accumulate points if we're processing data this frame
-        if shouldProcessData && shouldAccumulate(frame: currentFrame), updateDepthTextures(frame: currentFrame) {
+        // Only process LiDAR/point cloud data at the throttled rate
+        if shouldProcessLiDARThisFrame(currentFrame) && shouldAccumulate(frame: currentFrame), updateDepthTextures(frame: currentFrame) {
             accumulatePoints(frame: currentFrame, commandBuffer: commandBuffer, renderEncoder: renderEncoder)
         }
         
@@ -241,10 +236,10 @@ final class Renderer {
         commandBuffer.commit()
     }
     
-    private func shouldProcessDataThisFrame(_ frame: ARFrame) -> Bool {
+    private func shouldProcessLiDARThisFrame(_ frame: ARFrame) -> Bool {
         let currentTime = frame.timestamp
-        if currentTime - lastDataProcessingTime >= dataProcessingInterval {
-            lastDataProcessingTime = currentTime
+        if currentTime - lastLidarProcessingTime >= lidarProcessingInterval {
+            lastLidarProcessingTime = currentTime
             return true
         }
         return false
@@ -252,7 +247,7 @@ final class Renderer {
     
     // Helper function to get current processing rate for UI feedback
     func getCurrentProcessingRate() -> String {
-        return String(format: "%.1f FPS", dataProcessingFPS)
+        return String(format: "%.1f FPS", lidarProcessingFPS)
     }
     
     private func shouldAccumulate(frame: ARFrame) -> Bool {

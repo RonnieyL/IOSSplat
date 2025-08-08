@@ -36,8 +36,8 @@ final class MainController: UIViewController, ARSessionDelegate {
             renderer = Renderer(session: session, metalDevice: device, renderDestination: view)
             renderer.drawRectResized(size: view.bounds.size)
             
-            // Set initial data processing rate to 3 FPS
-            renderer.dataProcessingFPS = 3.0
+            // Set initial LiDAR processing rate to 3 FPS
+            renderer.lidarProcessingFPS = 3.0
         }
         
         clearButton = createButton(mainView: self, iconName: "trash.circle.fill",
@@ -60,7 +60,7 @@ final class MainController: UIViewController, ARSessionDelegate {
             tintColor: .white, hidden: !isUIEnabled)
         view.addSubview(rgbButton)
         
-        // Setup FPS control
+        // Setup LiDAR FPS control (camera feed stays at full framerate)
         fpsControl.selectedSegmentIndex = 1  // Default to "3 FPS"
         fpsControl.addTarget(self, action: #selector(viewValueChanged), for: .valueChanged)
         fpsControl.translatesAutoresizingMaskIntoConstraints = false
@@ -125,7 +125,7 @@ final class MainController: UIViewController, ARSessionDelegate {
             
         case fpsControl:
             let fpsValues: [Double] = [1.0, 3.0, 5.0, 10.0, 30.0]
-            renderer.dataProcessingFPS = fpsValues[fpsControl.selectedSegmentIndex]
+            renderer.lidarProcessingFPS = fpsValues[fpsControl.selectedSegmentIndex]
             
         case rgbButton:
             renderer.rgbOn = !renderer.rgbOn
