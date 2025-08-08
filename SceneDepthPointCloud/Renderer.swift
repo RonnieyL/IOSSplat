@@ -5,6 +5,7 @@
 import Metal
 import MetalKit
 import ARKit
+import CoreImage
 
 
 // MARK: - Core Metal Scan Renderer
@@ -31,6 +32,19 @@ final class Renderer {
     }
     private var lidarProcessingInterval: TimeInterval = 1.0 / 3.0
     private var lastLidarProcessingTime: TimeInterval = 0
+    
+    // Data extraction system for Gaussian Splatting
+    var isDataExtractionEnabled = false
+    var dataExtractionFPS: Double = 3.0 {
+        didSet {
+            dataExtractionInterval = 1.0 / dataExtractionFPS
+        }
+    }
+    private var dataExtractionInterval: TimeInterval = 1.0 / 3.0
+    private var lastDataExtractionTime: TimeInterval = 0
+    private var frameCounter = 0
+    private var extractedFrameCounter = 0
+    private var currentScanFolderName = ""
     // We only use portrait orientation in this app
     private let orientation = UIInterfaceOrientation.portrait
     // Camera's threshold values for detecting when the camera moves so that we can accumulate the points
@@ -200,6 +214,11 @@ final class Renderer {
         currentBufferIndex = (currentBufferIndex + 1) % maxInFlightBuffers
         pointCloudUniformsBuffers[currentBufferIndex][0] = pointCloudUniforms
 
+        // Extract data for Gaussian Splatting if enabled
+        if shouldExtractDataThisFrame(currentFrame) {
+            extractCameraData(frame: currentFrame)
+        }
+        
         // Only process LiDAR/point cloud data at the throttled rate
         if shouldProcessLiDARThisFrame(currentFrame) && shouldAccumulate(frame: currentFrame), updateDepthTextures(frame: currentFrame) {
             accumulatePoints(frame: currentFrame, commandBuffer: commandBuffer, renderEncoder: renderEncoder)
@@ -248,6 +267,17 @@ final class Renderer {
     // Helper function to get current processing rate for UI feedback
     func getCurrentProcessingRate() -> String {
         return String(format: "%.1f FPS", lidarProcessingFPS)
+    }
+    
+    private func shouldExtractDataThisFrame(_ frame: ARFrame) -> Bool {
+        guard isDataExtractionEnabled else { return false }
+        
+        let currentTime = frame.timestamp
+        if currentTime - lastDataExtractionTime >= dataExtractionInterval {
+            lastDataExtractionTime = currentTime
+            return true
+        }
+        return false
     }
     
     private func shouldAccumulate(frame: ARFrame) -> Bool {
@@ -366,6 +396,156 @@ extension Renderer {
             for: .documentDirectory, in: .userDomainMask)[0]
         savedCloudURLs = try! FileManager.default.contentsOfDirectory(
             at: docs, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
+    }
+    
+    // MARK: - Data Extraction for Gaussian Splatting
+    func startDataExtraction() {
+        isDataExtractionEnabled = true
+        frameCounter = 0
+        extractedFrameCounter = 0
+        createDataExtractionDirectories()
+        print("Started data extraction at \(dataExtractionFPS) FPS")
+    }
+    
+    func stopDataExtraction() {
+        guard isDataExtractionEnabled else { return }
+        isDataExtractionEnabled = false
+        exportCOLMAPFiles()
+        print("Stopped data extraction. Total frames: \(extractedFrameCounter)")
+    }
+    
+    private func createDataExtractionDirectories() {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        
+        // Create folder with timestamp for this scan session
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+        let timestamp = dateFormatter.string(from: Date())
+        let scanFolderName = "scan_\(timestamp)"
+        
+        currentScanFolderName = scanFolderName
+        
+        let exportURL = documentsURL.appendingPathComponent(scanFolderName)
+        let imagesURL = exportURL.appendingPathComponent("images")
+        let sparseURL = exportURL.appendingPathComponent("sparse")
+        let sparse0URL = sparseURL.appendingPathComponent("0")
+        
+        try? FileManager.default.createDirectory(at: exportURL, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: sparse0URL, withIntermediateDirectories: true)
+        
+        print("Created scan folder: \(scanFolderName)")
+    }
+    
+    private func extractCameraData(frame: ARFrame) {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let exportURL = documentsURL.appendingPathComponent(currentScanFolderName)
+        
+        // 1. Save RGB Image
+        saveRGBImage(frame: frame, to: exportURL, frameIndex: extractedFrameCounter)
+        
+        // 2. Extract and save camera intrinsics
+        saveCameraIntrinsics(frame: frame, to: exportURL, frameIndex: extractedFrameCounter)
+        
+        // 3. Extract and save camera extrinsics (pose)
+        saveCameraExtrinsics(frame: frame, to: exportURL, frameIndex: extractedFrameCounter)
+        
+        extractedFrameCounter += 1
+    }
+    
+    private func saveRGBImage(frame: ARFrame, to baseURL: URL, frameIndex: Int) {
+        // Convert ARFrame's captured image to JPEG
+        let pixelBuffer = frame.capturedImage
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+        
+        // Convert to RGB color space and create JPEG data
+        if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+           let jpegData = context.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: [:]) {
+            
+            let imageURL = baseURL.appendingPathComponent("images").appendingPathComponent(String(format: "%06d.jpg", frameIndex))
+            
+            do {
+                try jpegData.write(to: imageURL)
+            } catch {
+                print("Failed to save image \(frameIndex): \(error)")
+            }
+        }
+    }
+    
+    private func saveCameraIntrinsics(frame: ARFrame, to baseURL: URL, frameIndex: Int) {
+        let intrinsics = frame.camera.intrinsics
+        let imageResolution = frame.camera.imageResolution
+        
+        // Extract intrinsic parameters
+        let fx = intrinsics[0][0]  // Focal length X
+        let fy = intrinsics[1][1]  // Focal length Y
+        let cx = intrinsics[2][0]  // Principal point X
+        let cy = intrinsics[2][1]  // Principal point Y
+        
+        // COLMAP cameras.txt format: CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]
+        // Using PINHOLE model: fx fy cx cy
+        let cameraLine = "\(frameIndex) PINHOLE \(Int(imageResolution.width)) \(Int(imageResolution.height)) \(fx) \(fy) \(cx) \(cy)\n"
+        
+        let camerasURL = baseURL.appendingPathComponent("sparse/0/cameras.txt")
+        
+        // Append to cameras.txt file
+        if let data = cameraLine.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: camerasURL.path) {
+                if let fileHandle = try? FileHandle(forWritingTo: camerasURL) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: camerasURL)
+            }
+        }
+    }
+    
+    private func saveCameraExtrinsics(frame: ARFrame, to baseURL: URL, frameIndex: Int) {
+        // Get camera transform (camera-to-world)
+        let cameraToWorld = frame.camera.transform
+        
+        // Convert to world-to-camera (what COLMAP expects)
+        let worldToCamera = cameraToWorld.inverse
+        
+        // Extract rotation (as quaternion) and translation
+        let rotation = simd_quaternion(worldToCamera)
+        let translation = worldToCamera.columns.3
+        
+        // COLMAP images.txt format: 
+        // IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
+        let imageLine = "\(frameIndex) \(rotation.real) \(rotation.imag.x) \(rotation.imag.y) \(rotation.imag.z) \(translation.x) \(translation.y) \(translation.z) \(frameIndex) \(String(format: "%06d.jpg", frameIndex))\n"
+        
+        let imagesURL = baseURL.appendingPathComponent("sparse/0/images.txt")
+        
+        // Append to images.txt file
+        if let data = imageLine.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: imagesURL.path) {
+                if let fileHandle = try? FileHandle(forWritingTo: imagesURL) {
+                    fileHandle.seekToEndOfFile()
+                    fileHandle.write(data)
+                    fileHandle.closeFile()
+                }
+            } else {
+                try? data.write(to: imagesURL)
+            }
+        }
+    }
+    
+    private func exportCOLMAPFiles() {
+        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let exportURL = documentsURL.appendingPathComponent(currentScanFolderName)
+        
+        // Create empty points3D.txt (or export sparse point cloud if desired)
+        let pointsURL = exportURL.appendingPathComponent("sparse/0/points3D.txt")
+        let emptyPointsData = "# 3D point list with one line of data per point:\n# POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID POINT2D_IDX)\n".data(using: .utf8)
+        try? emptyPointsData?.write(to: pointsURL)
+        
+        print("COLMAP data exported to: \(exportURL.path)")
+        print("Total extracted frames: \(extractedFrameCounter)")
+        print("Files accessible in iOS Files app under: \(currentScanFolderName)")
     }
 }
 

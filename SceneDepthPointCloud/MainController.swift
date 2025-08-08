@@ -67,6 +67,8 @@ final class MainController: UIViewController, ARSessionDelegate {
         fpsControl.isHidden = !isUIEnabled
         fpsControl.backgroundColor = UIColor.black.withAlphaComponent(0.6)
         view.addSubview(fpsControl)
+        
+
 
         NSLayoutConstraint.activate([
             clearButton.leftAnchor.constraint(equalTo: view.leftAnchor, constant: 50),
@@ -136,6 +138,8 @@ final class MainController: UIViewController, ARSessionDelegate {
             renderer.isInViewSceneMode = true
             setShowSceneButtonStyle(isScanning: false)
             renderer.clearParticles()
+            // Stop data extraction when clearing
+            renderer.stopDataExtraction()
             
         case saveButton:
             renderer.isInViewSceneMode = true
@@ -148,8 +152,13 @@ final class MainController: UIViewController, ARSessionDelegate {
                 renderer.showParticles = true
                 self.toggleParticlesButton.setBackgroundImage(.init(systemName: "circle.grid.hex.fill"), for: .normal)
                 self.setShowSceneButtonStyle(isScanning: true)
+                // Start data extraction when scanning starts
+                renderer.dataExtractionFPS = renderer.lidarProcessingFPS
+                renderer.startDataExtraction()
             } else {
                 self.setShowSceneButtonStyle(isScanning: false)
+                // Stop data extraction when scanning stops
+                renderer.stopDataExtraction()
             }
             
         case toggleParticlesButton:
@@ -157,6 +166,8 @@ final class MainController: UIViewController, ARSessionDelegate {
             if (!renderer.showParticles) {
                 renderer.isInViewSceneMode = true
                 self.setShowSceneButtonStyle(isScanning: false)
+                // Stop data extraction when particles are hidden
+                renderer.stopDataExtraction()
             }
             let iconName = "circle.grid.hex" + (renderer.showParticles ? ".fill" : "")
             self.toggleParticlesButton.setBackgroundImage(.init(systemName: iconName), for: .normal)
@@ -279,6 +290,8 @@ extension MainController {
             alert.dismiss(animated: true, completion: nil)
         }
     }
+    
+
 }
 
 // MARK: - RenderDestinationProvider
