@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="18122" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="BV1-FR-VrT">
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="18122" targetRuntime="iOS.CocoaTouch" propertyAccessControl="none" useAutolayout="YES" useTraitCollections="YES" useSafeAreas="YES" colorMatched="YES" initialViewController="OSC-ID-123">
     <device id="retina6_1" orientation="portrait" appearance="light"/>
     <dependencies>
         <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="18093"/>
@@ -7,6 +7,72 @@
         <capability name="documents saved in the Xcode 8 format" minToolsVersion="8.0"/>
     </dependencies>
     <scenes>
+        <!--Option Selection Controller-->
+        <scene sceneID="OSC-SC-123">
+            <objects>
+                <viewController id="OSC-ID-123" customClass="OptionSelectionController" customModule="Point_Cloud" customModuleProvider="target" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="OSC-View-123">
+                        <rect key="frame" x="0.0" y="0.0" width="414" height="896"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Pick Your Option" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="OSC-Title-123">
+                                <rect key="frame" x="20" y="200" width="374" height="38"/>
+                                <fontDescription key="fontDescription" type="boldSystem" pointSize="32"/>
+                                <nil key="textColor"/>
+                                <nil key="highlightedColor"/>
+                            </label>
+                            <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="OSC-LiDAR-123">
+                                <rect key="frame" x="50" y="350" width="314" height="60"/>
+                                <constraints>
+                                    <constraint firstAttribute="height" constant="60" id="OSC-LiDAR-Height-123"/>
+                                </constraints>
+                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
+                                <state key="normal" title="LiDAR Scanner">
+                                    <color key="titleColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+                                </state>
+                                <connections>
+                                    <action selector="lidarButtonTapped:" destination="OSC-ID-123" eventType="touchUpInside" id="OSC-LiDAR-Action-123"/>
+                                    <segue destination="BV1-FR-VrT" kind="show" identifier="showLiDARScanner" id="OSC-Segue-123"/>
+                                </connections>
+                            </button>
+                            <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="OSC-MVS-123">
+                                <rect key="frame" x="50" y="450" width="314" height="60"/>
+                                <constraints>
+                                    <constraint firstAttribute="height" constant="60" id="OSC-MVS-Height-123"/>
+                                </constraints>
+                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
+                                <state key="normal" title="Depth MVS">
+                                    <color key="titleColor" systemColor="systemGrayColor"/>
+                                </state>
+                                <connections>
+                                    <action selector="depthMVSButtonTapped:" destination="OSC-ID-123" eventType="touchUpInside" id="OSC-MVS-Action-123"/>
+                                </connections>
+                            </button>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="OSC-SafeArea-123"/>
+                        <color key="backgroundColor" systemColor="systemBackgroundColor"/>
+                        <constraints>
+                            <constraint firstItem="OSC-Title-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="20" id="OSC-Title-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-Title-123" secondAttribute="trailing" constant="20" id="OSC-Title-Trailing-123"/>
+                            <constraint firstItem="OSC-Title-123" firstAttribute="top" secondItem="OSC-SafeArea-123" secondAttribute="top" constant="156" id="OSC-Title-Top-123"/>
+                            <constraint firstItem="OSC-LiDAR-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-LiDAR-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-LiDAR-123" secondAttribute="trailing" constant="50" id="OSC-LiDAR-Trailing-123"/>
+                            <constraint firstItem="OSC-LiDAR-123" firstAttribute="top" secondItem="OSC-Title-123" secondAttribute="bottom" constant="112" id="OSC-LiDAR-Top-123"/>
+                            <constraint firstItem="OSC-MVS-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-MVS-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-MVS-123" secondAttribute="trailing" constant="50" id="OSC-MVS-Trailing-123"/>
+                            <constraint firstItem="OSC-MVS-123" firstAttribute="top" secondItem="OSC-LiDAR-123" secondAttribute="bottom" constant="40" id="OSC-MVS-Top-123"/>
+                        </constraints>
+                    </view>
+                    <connections>
+                        <outlet property="depthMVSButton" destination="OSC-MVS-123" id="OSC-MVS-Outlet-123"/>
+                        <outlet property="lidarButton" destination="OSC-LiDAR-123" id="OSC-LiDAR-Outlet-123"/>
+                        <outlet property="titleLabel" destination="OSC-Title-123" id="OSC-Title-Outlet-123"/>
+                    </connections>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="OSC-FirstResponder-123" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="-600" y="138"/>
+        </scene>
         <!--Main Controller-->
         <scene sceneID="tXr-a1-R10">
             <objects>
@@ -61,4 +127,12 @@
             <point key="canvasLocation" x="922" y="134"/>
         </scene>
     </scenes>
+    <resources>
+        <systemColor name="systemBackgroundColor">
+            <color white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+        </systemColor>
+        <systemColor name="systemGrayColor">
+            <color red="0.55686274509803924" green="0.55686274509803924" blue="0.57647058823529407" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+        </systemColor>
+    </resources>
 </document>
