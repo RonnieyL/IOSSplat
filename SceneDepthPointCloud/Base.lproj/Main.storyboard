@@ -46,6 +46,7 @@
                                 </state>
                                 <connections>
                                     <action selector="depthMVSButtonTapped:" destination="OSC-ID-123" eventType="touchUpInside" id="OSC-MVS-Action-123"/>
+                                    <segue destination="MVS-ID-456" kind="show" identifier="showDepthMVS" id="OSC-MVS-Segue-123"/>
                                 </connections>
                             </button>
                         </subviews>
@@ -86,6 +87,20 @@
                 <placeholder placeholderIdentifier="IBFirstResponder" id="SZV-WD-TEh" sceneMemberID="firstResponder"/>
             </objects>
             <point key="canvasLocation" x="139" y="138"/>
+        </scene>
+        <!--MVS Controller-->
+        <scene sceneID="MVS-SC-456">
+            <objects>
+                <viewController id="MVS-ID-456" customClass="MVSController" customModule="Point_Cloud" customModuleProvider="target" sceneMemberID="viewController">
+                    <view key="view" opaque="NO" contentMode="scaleToFill" id="MVS-View-456" customClass="MTKView">
+                        <rect key="frame" x="0.0" y="0.0" width="414" height="896"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <viewLayoutGuide key="safeArea" id="MVS-SafeArea-456"/>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="MVS-FirstResponder-456" sceneMemberID="firstResponder"/>
+            </objects>
+            <point key="canvasLocation" x="922" y="138"/>
         </scene>
         <!--Unsupported View Controller-->
         <scene sceneID="LNQ-b5-bmB">

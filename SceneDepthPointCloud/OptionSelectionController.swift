@@ -33,7 +33,7 @@ class OptionSelectionController: UIViewController {
         setupButton(lidarButton, title: "LiDAR Scanner", isEnabled: true)
         
         // Set up Depth MVS button  
-        setupButton(depthMVSButton, title: "Depth MVS", isEnabled: false)
+        setupButton(depthMVSButton, title: "Depth MVS", isEnabled: true)
     }
     
     private func setupButton(_ button: UIButton, title: String, isEnabled: Bool) {
@@ -59,13 +59,7 @@ class OptionSelectionController: UIViewController {
     }
     
     @IBAction func depthMVSButtonTapped(_ sender: UIButton) {
-        // For now, show an alert that this feature is coming soon
-        let alert = UIAlertController(
-            title: "Coming Soon",
-            message: "Depth MVS functionality is under development.",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
+        // Navigate to the Depth MVS scanner
+        performSegue(withIdentifier: "showDepthMVS", sender: self)
     }
 }
