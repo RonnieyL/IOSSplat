@@ -1,31 +1,30 @@
-
-#ifndef ShaderTypes_h
-#define ShaderTypes_h
+#ifndef MVSShaderTypes_h
+#define MVSShaderTypes_h
 
 #include <simd/simd.h>
 
-enum TextureIndices {
-    kTextureY = 0,
-    kTextureCbCr = 1,
-    kTextureDepth = 2,
-    kTextureConfidence = 3
+enum MVSTextureIndices {
+    kMVSTextureY = 0,
+    kMVSTextureCbCr = 1,
+    kMVSTextureDepth = 2,
+    kMVSTextureConfidence = 3
 };
 
-enum BufferIndices {
-    kPointCloudUniforms = 0,
-    kParticleUniforms = 1,
-    kGridPoints = 2,
-    kRGBUniforms = 3
+enum MVSBufferIndices {
+    kMVSPointCloudUniforms = 0,
+    kMVSParticleUniforms = 1,
+    kMVSGridPoints = 2,
+    kMVSRGBUniforms = 3
 };
 
-struct RGBUniforms {
+struct MVSRGBUniforms {
     matrix_float3x3 cameraToWorld;
     matrix_float3x3 viewToCamera;
     float viewRatio;
     float radius;
 };
 
-struct PointCloudUniforms {
+struct MVSPointCloudUniforms {
     matrix_float4x4 viewProjectionMatrix;
     matrix_float4x4 localToWorld;
     matrix_float4x4 cameraToWorld;
@@ -42,10 +41,10 @@ struct PointCloudUniforms {
     int numGridPoints;
 };
 
-struct ParticleUniforms {
+struct MVSParticleUniforms {
     simd_float3 position;
     simd_float3 color;
     float confidence;
 };
 
-#endif /* ShaderTypes_h */
+#endif /* MVSShaderTypes_h */

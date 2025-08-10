@@ -11,12 +11,12 @@ import CoreImage
 // MARK: - Core Metal MVS Scan Renderer
 final class MVSRenderer {
     var savedCloudURLs = [URL]()
-    private var cpuParticlesBuffer = [CPUParticle]()
+    private var cpuParticlesBuffer = [MVSParticle]()
     var showParticles = true
     var isInViewSceneMode = true
     var isSavingFile = false
     var highConfCount = 0
-    var savingError: XError? = nil
+    var savingError: MVSError? = nil
     // Maximum number of points we store in the point cloud
     private let maxPoints = 15_000_000
     // Number of sample points on the grid
@@ -60,7 +60,7 @@ final class MVSRenderer {
     // Metal objects and textures
     private let device: MTLDevice
     private let library: MTLLibrary
-    private let renderDestination: RenderDestinationProvider
+    private let renderDestination: MVSRenderDestinationProvider
     private let relaxedStencilState: MTLDepthStencilState
     private let depthStencilState: MTLDepthStencilState
     private let commandQueue: MTLCommandQueue
@@ -78,20 +78,20 @@ final class MVSRenderer {
     // The current viewport size
     private var viewportSize = CGSize()
     // The grid of sample points
-    private lazy var gridPointsBuffer = MetalBuffer<SIMD2<Float>>(device: device,
-                                                                   array: makeGridPoints(),
-                                                                   index: kGridPoints.rawValue, options: [])
+    private lazy var gridPointsBuffer = MVSMetalBuffer<SIMD2<Float>>(device: device,
+                                                                     array: makeGridPoints(),
+                                                                     index: kMVSGridPoints.rawValue, options: [])
     
     // RGB buffer
-    private var rgbUniforms: RGBUniforms = RGBUniforms()
-    private lazy var rgbUniformsBuffers = MetalBuffer<RGBUniforms>(device: device, count: maxInFlightBuffers, index: kRGBUniforms.rawValue)
+    private var rgbUniforms: MVSRGBUniforms = MVSRGBUniforms()
+    private lazy var rgbUniformsBuffers = MVSMetalBuffer<MVSRGBUniforms>(device: device, count: maxInFlightBuffers, index: kMVSRGBUniforms.rawValue)
     
     // Point Cloud buffer
-    private var pointCloudUniforms: PointCloudUniforms = PointCloudUniforms()
-    private lazy var pointCloudUniformsBuffers = MetalBuffer<PointCloudUniforms>(device: device, count: maxInFlightBuffers, index: kPointCloudUniforms.rawValue)
+    private var pointCloudUniforms: MVSPointCloudUniforms = MVSPointCloudUniforms()
+    private lazy var pointCloudUniformsBuffers = MVSMetalBuffer<MVSPointCloudUniforms>(device: device, count: maxInFlightBuffers, index: kMVSPointCloudUniforms.rawValue)
     
     // Particles buffer
-    private var particlesBuffer: MetalBuffer<CPUParticle>
+    private var particlesBuffer: MVSMetalBuffer<MVSParticle>
     private var currentPointIndex = 0
     private var currentPointCount = 0
     
@@ -114,7 +114,7 @@ final class MVSRenderer {
     // 2. Implement actual MVS depth estimation
     // 3. Add feature detection and matching
     
-    init(session: ARSession, metalDevice device: MTLDevice, renderDestination: RenderDestinationProvider) {
+    init(session: ARSession, metalDevice device: MTLDevice, renderDestination: MVSRenderDestinationProvider) {
         self.session = session
         self.device = device
         self.renderDestination = renderDestination
@@ -122,9 +122,9 @@ final class MVSRenderer {
         commandQueue = device.makeCommandQueue()!
         
         // initialize our buffers
-        particlesBuffer = MetalBuffer<CPUParticle>(device: device,
-                                                   count: maxPoints,
-                                                   index: kParticleUniforms.rawValue)
+        particlesBuffer = MVSMetalBuffer<MVSParticle>(device: device,
+                                                      count: maxPoints,
+                                                      index: kMVSParticleUniforms.rawValue)
         
         // rbg does not need to read/write depth
         let relaxedStateDescriptor = MTLDepthStencilDescriptor()
@@ -193,8 +193,8 @@ extension MVSRenderer {
             renderEncoder.setRenderPipelineState(rgbPipelineState)
             renderEncoder.setVertexBuffer(rgbUniformsBuffers[currentBufferIndex])
             renderEncoder.setFragmentBuffer(rgbUniformsBuffers[currentBufferIndex])
-            renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(capturedImageTextureY!), index: Int(kTextureY.rawValue))
-            renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(capturedImageTextureCbCr!), index: Int(kTextureCbCr.rawValue))
+            renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(capturedImageTextureY!), index: Int(kMVSTextureY.rawValue))
+            renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(capturedImageTextureCbCr!), index: Int(kMVSTextureCbCr.rawValue))
             renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
        
@@ -334,7 +334,7 @@ extension MVSRenderer {
             )
             
             // Create particle with high confidence from AI depth
-            let particle = CPUParticle(
+            let particle = MVSParticle(
                 position: simd_float3(worldPoint.x, worldPoint.y, worldPoint.z),
                 color: color / 255.0, // Normalize to 0-1 range
                 confidence: 2 // High confidence for AI depth
@@ -377,7 +377,7 @@ extension MVSRenderer {
                 0.8
             )
             
-            let particle = CPUParticle(
+            let particle = MVSParticle(
                 position: simd_float3(worldPoint.x, worldPoint.y, worldPoint.z),
                 color: color,
                 confidence: 1 // Medium confidence for fallback
@@ -638,7 +638,7 @@ extension MVSRenderer {
 // MARK: - Metal Renderer Helpers
 private extension MVSRenderer {
     func makeUnprojectionPipelineState() -> MTLRenderPipelineState? {
-        guard let vertexFunction = library.makeFunction(name: "unprojectVertex") else {
+        guard let vertexFunction = library.makeFunction(name: "mvsUnprojectVertex") else {
             return nil
         }
         
@@ -652,8 +652,8 @@ private extension MVSRenderer {
     }
     
     func makeRGBPipelineState() -> MTLRenderPipelineState? {
-        guard let vertexFunction = library.makeFunction(name: "rgbVertex"),
-            let fragmentFunction = library.makeFunction(name: "rgbFragment") else {
+        guard let vertexFunction = library.makeFunction(name: "mvsRgbVertex"),
+            let fragmentFunction = library.makeFunction(name: "mvsRgbFragment") else {
                 return nil
         }
         
@@ -667,8 +667,8 @@ private extension MVSRenderer {
     }
     
     func makeParticlePipelineState() -> MTLRenderPipelineState? {
-        guard let vertexFunction = library.makeFunction(name: "particleVertex"),
-            let fragmentFunction = library.makeFunction(name: "particleFragment") else {
+        guard let vertexFunction = library.makeFunction(name: "mvsParticleVertex"),
+            let fragmentFunction = library.makeFunction(name: "mvsParticleFragment") else {
                 return nil
         }
         
@@ -755,8 +755,8 @@ private extension MVSRenderer {
 }
 
 // MARK: - Type Aliases and Extensions (from Helpers.swift)
-typealias Float2 = SIMD2<Float>
-typealias Float3 = SIMD3<Float>
+typealias MVSFloat2 = SIMD2<Float>
+typealias MVSFloat3 = SIMD3<Float>
 
 extension Float {
     static let degreesToRadian = Float.pi / 180
@@ -770,8 +770,8 @@ extension matrix_float3x3 {
     }
 }
 
-// MARK: - RenderDestinationProvider Protocol
-protocol RenderDestinationProvider {
+// MARK: - MVS RenderDestinationProvider Protocol
+protocol MVSRenderDestinationProvider {
     var currentRenderPassDescriptor: MTLRenderPassDescriptor? { get }
     var currentDrawable: CAMetalDrawable? { get }
     var colorPixelFormat: MTLPixelFormat { get }

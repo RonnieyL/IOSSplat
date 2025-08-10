@@ -270,8 +270,8 @@ extension MVSController: MTKViewDelegate {
     }
 }
 
-// MARK: - RenderDestinationProvider
-extension MVSController: RenderDestinationProvider {
+// MARK: - MVSRenderDestinationProvider
+extension MVSController: MVSRenderDestinationProvider {
     var currentRenderPassDescriptor: MTLRenderPassDescriptor? {
         return view.currentRenderPassDescriptor
     }

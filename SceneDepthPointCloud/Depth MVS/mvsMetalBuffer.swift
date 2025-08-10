@@ -2,18 +2,18 @@
 See LICENSE folder for this sample's licensing information.
 
 Abstract:
-Type-safe utility for working with MTLBuffers.
+Type-safe utility for working with MTLBuffers - MVS Version.
 */
 
 import MetalKit
 
-protocol Resource {
+protocol MVSResource {
     associatedtype Element
 }
 
 /// A wrapper around MTLBuffer which provides type safe access and assignment to the underlying MTLBuffer's contents.
 
-struct MetalBuffer<Element>: Resource {
+struct MVSMetalBuffer<Element>: MVSResource {
         
     /// The underlying MTLBuffer.
     fileprivate let buffer: MTLBuffer
@@ -80,7 +80,7 @@ struct MetalBuffer<Element>: Resource {
 
 }
 
-extension MetalBuffer: MTLBuffer {
+extension MVSMetalBuffer: MTLBuffer {
     
     var contents: UnsafeMutableRawPointer {
         return buffer.contents()
