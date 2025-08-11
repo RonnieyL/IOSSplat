@@ -5,7 +5,7 @@
 
 import Foundation
 
-final class CPUParticle {
+final class MVSCPUParticle {
     var position: simd_float3
     var color: simd_float3
     var confidence: Float
