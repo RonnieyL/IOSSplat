@@ -165,6 +165,24 @@ kernel void inriaNormalizeDepth(texture2d<float, access::read> inputDepth [[text
     outputDepth.write(float4(metricDepth, 0, 0, 1), gid);
 }
 
+/// Simple depth normalization (for debugging)
+kernel void simpleNormalizeDepth(texture2d<float, access::read> inputDepth [[texture(0)]],
+                                texture2d<float, access::write> outputDepth [[texture(1)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= inputDepth.get_width() || gid.y >= inputDepth.get_height()) {
+        return;
+    }
+    
+    float rawDepth = inputDepth.read(gid).r;
+    
+    // Simple clamping and scaling for visualization
+    // Depth-Anything outputs relative depth 0-1, convert to reasonable metric range
+    float metricDepth = rawDepth * 10.0f + 0.1f;  // Map to 0.1m - 10.1m range
+    metricDepth = clamp(metricDepth, 0.1f, 10.0f);
+    
+    outputDepth.write(float4(metricDepth, 0, 0, 1), gid);
+}
+
 vertex RGBVertexOut rgbVertex(uint vertexID [[vertex_id]],
                               constant RGBUniforms &uniforms [[buffer(0)]]) {
     const float3 texCoord = float3(viewTexCoords[vertexID], 1) * uniforms.viewToCamera;
@@ -182,24 +200,27 @@ fragment float4 depthViewFragment(RGBVertexOut in [[stage_in]],
                                  texture2d<float, access::sample> capturedImageTextureCbCr [[texture(kTextureCbCr)]],
                                  texture2d<float, access::sample> depthTexture [[texture(kTextureDepth)]]) {
     
-    // Sample raw depth from AI model (matching HuggingFace example approach)
-    const float rawDepth = depthTexture.sample(colorSampler, in.texCoord).r;
+    // Sample depth texture
+    const float depth = depthTexture.sample(colorSampler, in.texCoord).r;
     
-    // Convert to grayscale depth visualization (like HuggingFace example)
-    // Closer objects = darker, farther objects = lighter (standard depth map convention)
-    float depthGray = 0.0f;
-    if (rawDepth > 0.001f) {
-        // Normalize depth to 0-1 range for visualization
-        // Assuming depth range of 0.3m to 15m (from our normalization)
-        float normalizedDepth = (rawDepth - 0.3f) / (15.0f - 0.3f);
+    // Debug: Show different colors for different depth ranges to identify issues
+    if (depth < 0.001f) {
+        // No depth data = red
+        return float4(1.0f, 0.0f, 0.0f, 1.0f);
+    } else if (depth > 100.0f) {
+        // Extreme depth = blue
+        return float4(0.0f, 0.0f, 1.0f, 1.0f);
+    } else {
+        // Normal depth = grayscale (HuggingFace style)
+        // Map 0.1m-10m to 0-1 grayscale
+        float normalizedDepth = (depth - 0.1f) / (10.0f - 0.1f);
         normalizedDepth = saturate(normalizedDepth);
         
-        // Invert so closer = darker (standard depth map convention)
-        depthGray = 1.0f - normalizedDepth;
+        // Invert: close = dark, far = light
+        float grayValue = 1.0f - normalizedDepth;
+        
+        return float4(grayValue, grayValue, grayValue, 1.0f);
     }
-    
-    // Pure grayscale depth map (matching HuggingFace style)
-    return float4(depthGray, depthGray, depthGray, 1.0f);
 }
 
 fragment float4 rgbFragment(RGBVertexOut in [[stage_in]],

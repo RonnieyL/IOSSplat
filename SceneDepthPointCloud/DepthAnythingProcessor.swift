@@ -32,7 +32,8 @@ class DepthAnythingProcessor {
         self.ciContext = CIContext(mtlDevice: metalDevice)
         
         // Try to load the CoreML model
-        if let modelURL = Bundle.main.url(forResource: "DepthAnythingV2SmallF16", withExtension: "mlpackage"),
+        if let modelURL = Bundle.main.url(forResource: "DepthAnythingV2SmallF16", withExtension: "mlpackage", subdirectory: "Models") ??
+                          Bundle.main.url(forResource: "DepthAnythingV2SmallF16", withExtension: "mlpackage"),
            let model = try? MLModel(contentsOf: modelURL) {
             self.depthModel = model
             self.visionModel = try? VNCoreMLModel(for: model)

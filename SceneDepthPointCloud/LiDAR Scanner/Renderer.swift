@@ -143,6 +143,7 @@ final class Renderer {
     
     // MVS-specific components
     private var depthAnythingProcessor: DepthAnythingProcessor?
+    private var simpleDepthProcessor: SimpleDepthProcessor?
     private var aiDepthTexture: MTLTexture?
     
     var rgbOn: Bool = false {
@@ -179,6 +180,7 @@ final class Renderer {
         
         // Initialize Depth-Anything processor for MVS mode
         depthAnythingProcessor = DepthAnythingProcessor(metalDevice: device)
+        simpleDepthProcessor = SimpleDepthProcessor(metalDevice: device)
         
         self.loadSavedClouds()
     }
@@ -211,14 +213,22 @@ final class Renderer {
     }
     
     private func updateMVSDepthTextures(frame: ARFrame) -> Bool {
-        guard let depthAnythingProcessor = depthAnythingProcessor else {
-            print("⚠️ DepthAnythingProcessor not initialized")
+        // Use simple processor first to debug depth extraction issues
+        guard let simpleDepthProcessor = simpleDepthProcessor else {
+            print("❌ Simple depth processor not initialized")
             return false
         }
         
-        // Get AI depth texture synchronously for real-time performance
-        aiDepthTexture = depthAnythingProcessor.processDepthSync(from: frame)
-        return aiDepthTexture != nil
+        // Process depth with simplified, more reliable pipeline
+        aiDepthTexture = simpleDepthProcessor.processDepth(from: frame)
+        
+        if aiDepthTexture == nil {
+            print("❌ Simple depth processing failed")
+            return false
+        }
+        
+        print("✅ Depth texture created: \(aiDepthTexture!.width)x\(aiDepthTexture!.height)")
+        return true
     }
     
     private func update(frame: ARFrame) {
