@@ -379,10 +379,12 @@ final class Renderer {
     private func accumulatePointsMVS(frame: ARFrame, commandBuffer: MTLCommandBuffer, renderEncoder: MTLRenderCommandEncoder) {
         pointCloudUniforms.pointCloudCurrentIndex = Int32(currentPointIndex)
         
-        var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr, aiDepthTexture]
+        var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr]
+        var retainingAITexture = aiDepthTexture  // Keep AI texture alive separately
         
         commandBuffer.addCompletedHandler { buffer in
             retainingTextures.removeAll()
+            retainingAITexture = nil  // Release AI texture
             // copy gpu point buffer to cpu
             var i = self.cpuParticlesBuffer.count
             while (i < self.maxPoints && self.particlesBuffer[i].position != simd_float3(0.0,0.0,0.0)) {
@@ -405,7 +407,7 @@ final class Renderer {
         renderEncoder.setVertexBuffer(gridPointsBuffer)
         renderEncoder.setVertexTexture(CVMetalTextureGetTexture(capturedImageTextureY!), index: Int(kTextureY.rawValue))
         renderEncoder.setVertexTexture(CVMetalTextureGetTexture(capturedImageTextureCbCr!), index: Int(kTextureCbCr.rawValue))
-        renderEncoder.setVertexTexture(CVMetalTextureGetTexture(aiDepthTexture!), index: Int(kTextureDepth.rawValue))
+        renderEncoder.setVertexTexture(aiDepthTexture!, index: Int(kTextureDepth.rawValue))
         // Note: MVS doesn't have confidence texture - shader will generate confidence = 2
         renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: gridPointsBuffer.count)
         
