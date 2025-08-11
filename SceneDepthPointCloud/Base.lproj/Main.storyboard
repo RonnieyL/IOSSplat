@@ -49,19 +49,6 @@
                                     <segue destination="BV1-FR-VrT" kind="show" identifier="showDepthMVS" id="OSC-MVS-Segue-123"/>
                                 </connections>
                             </button>
-                        </subviews>
-                        <viewLayoutGuide key="safeArea" id="OSC-SafeArea-123"/>
-                        <color key="backgroundColor" systemColor="systemBackgroundColor"/>
-                        <constraints>
-                            <constraint firstItem="OSC-Title-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="20" id="OSC-Title-Leading-123"/>
-                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-Title-123" secondAttribute="trailing" constant="20" id="OSC-Title-Trailing-123"/>
-                            <constraint firstItem="OSC-Title-123" firstAttribute="top" secondItem="OSC-SafeArea-123" secondAttribute="top" constant="156" id="OSC-Title-Top-123"/>
-                            <constraint firstItem="OSC-LiDAR-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-LiDAR-Leading-123"/>
-                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-LiDAR-123" secondAttribute="trailing" constant="50" id="OSC-LiDAR-Trailing-123"/>
-                            <constraint firstItem="OSC-LiDAR-123" firstAttribute="top" secondItem="OSC-Title-123" secondAttribute="bottom" constant="112" id="OSC-LiDAR-Top-123"/>
-                            <constraint firstItem="OSC-MVS-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-MVS-Leading-123"/>
-                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-MVS-123" secondAttribute="trailing" constant="50" id="OSC-MVS-Trailing-123"/>
-                            <constraint firstItem="OSC-MVS-123" firstAttribute="top" secondItem="OSC-LiDAR-123" secondAttribute="bottom" constant="40" id="OSC-MVS-Top-123"/>
                             <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="OSC-DepthView-123">
                                 <rect key="frame" x="50" y="550" width="314" height="60"/>
                                 <constraints>
@@ -76,6 +63,19 @@
                                     <segue destination="BV1-FR-VrT" kind="show" identifier="showDepthView" id="OSC-DepthView-Segue-123"/>
                                 </connections>
                             </button>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="OSC-SafeArea-123"/>
+                        <color key="backgroundColor" systemColor="systemBackgroundColor"/>
+                        <constraints>
+                            <constraint firstItem="OSC-Title-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="20" id="OSC-Title-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-Title-123" secondAttribute="trailing" constant="20" id="OSC-Title-Trailing-123"/>
+                            <constraint firstItem="OSC-Title-123" firstAttribute="top" secondItem="OSC-SafeArea-123" secondAttribute="top" constant="156" id="OSC-Title-Top-123"/>
+                            <constraint firstItem="OSC-LiDAR-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-LiDAR-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-LiDAR-123" secondAttribute="trailing" constant="50" id="OSC-LiDAR-Trailing-123"/>
+                            <constraint firstItem="OSC-LiDAR-123" firstAttribute="top" secondItem="OSC-Title-123" secondAttribute="bottom" constant="112" id="OSC-LiDAR-Top-123"/>
+                            <constraint firstItem="OSC-MVS-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-MVS-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-MVS-123" secondAttribute="trailing" constant="50" id="OSC-MVS-Trailing-123"/>
+                            <constraint firstItem="OSC-MVS-123" firstAttribute="top" secondItem="OSC-LiDAR-123" secondAttribute="bottom" constant="40" id="OSC-MVS-Top-123"/>
                             <constraint firstItem="OSC-DepthView-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-DepthView-Leading-123"/>
                             <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-DepthView-123" secondAttribute="trailing" constant="50" id="OSC-DepthView-Trailing-123"/>
                             <constraint firstItem="OSC-DepthView-123" firstAttribute="top" secondItem="OSC-MVS-123" secondAttribute="bottom" constant="40" id="OSC-DepthView-Top-123"/>

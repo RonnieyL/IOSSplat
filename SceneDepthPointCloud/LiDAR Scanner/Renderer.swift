@@ -428,7 +428,7 @@ final class Renderer {
         
         // Render depth as grayscale overlay on camera feed
         var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr]
-        var retainingAITexture = aiDepthTexture
+        var retainingAITexture: MTLTexture? = aiDepthTexture
         
         commandBuffer.addCompletedHandler { buffer in
             retainingTextures.removeAll()

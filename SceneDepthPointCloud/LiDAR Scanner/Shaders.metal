@@ -95,7 +95,7 @@ vertex void unprojectVertexMVS(uint vertexID [[vertex_id]],
     particleUniforms[currentPointIndex].confidence = confidence;
 }
 
-/// Depth normalization compute shader (matching reference implementation)
+/// Improved depth normalization compute shader (better approximation of INRIA method)
 kernel void normalizeDepth(texture2d<float, access::read> inputDepth [[texture(0)]],
                           texture2d<float, access::write> outputDepth [[texture(1)]],
                           uint2 gid [[thread_position_in_grid]]) {
@@ -103,21 +103,31 @@ kernel void normalizeDepth(texture2d<float, access::read> inputDepth [[texture(0
         return;
     }
     
-    // First pass: calculate median (simplified approximation)
-    // Note: For performance, we use a simplified normalization
-    // The reference uses median + MAD, but this is computationally expensive in Metal
+    float rawDepth = inputDepth.read(gid).r;
     
-    float depth = inputDepth.read(gid).r;
+    // INRIA-inspired normalization
+    // Reference: depth = (depth - median) / mad
+    // For real-time performance, we use approximated percentile-based normalization
     
-    // Normalize depth to match reference implementation ranges (0.1m to 10,000m)
-    // Reference uses inverse depth between 1e-4f (10km) and 1e1f (0.1m)
-    depth = max(depth, 0.1f);     // Minimum depth 10cm (close objects)
-    depth = min(depth, 50.0f);    // Maximum depth 50m (reasonable indoor/outdoor)
+    // Clamp to reasonable relative depth range (0-1 from Depth-Anything)
+    rawDepth = saturate(rawDepth);
     
-    // Apply linear scaling for better depth distribution
-    depth = depth * 2.0f + 0.5f;  // Scale to LiDAR-like ranges
+    // Convert relative depth to metric depth using INRIA-like scaling
+    // Key insight: INRIA uses median-centered normalization, not linear
     
-    outputDepth.write(float4(depth, 0, 0, 1), gid);
+    // Approximate median = 0.5, MAD ≈ 0.3 for typical indoor scenes
+    float normalizedDepth = (rawDepth - 0.5f) / 0.3f;
+    
+    // Convert to metric depth (matching INRIA's inverse depth range)
+    // INRIA inverse depth range: 1e-4 to 1e1 → depth range: 0.1m to 10,000m
+    // We'll use a more practical range: 0.3m to 15m for indoor/outdoor scenes
+    
+    float invDepth = 0.5f + normalizedDepth * 0.4f;  // Map to inverse depth range
+    invDepth = clamp(invDepth, 0.067f, 3.33f);       // 0.3m to 15m depth range
+    
+    float metricDepth = 1.0f / invDepth;
+    
+    outputDepth.write(float4(metricDepth, 0, 0, 1), gid);
 }
 
 vertex RGBVertexOut rgbVertex(uint vertexID [[vertex_id]],
