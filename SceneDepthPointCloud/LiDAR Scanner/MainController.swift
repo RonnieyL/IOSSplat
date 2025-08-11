@@ -123,8 +123,8 @@ final class MainController: UIViewController, ARSessionDelegate {
         case .lidar:
             // Enable scene depth for LiDAR
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
-        case .mvs:
-            // No LiDAR needed for MVS - using AI depth
+        case .mvs, .depthView:
+            // No LiDAR needed for MVS/DepthView - using AI depth
             configuration.frameSemantics = []
         }
         

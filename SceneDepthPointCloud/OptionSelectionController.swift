@@ -16,6 +16,7 @@ class OptionSelectionController: UIViewController {
     @IBOutlet weak var titleLabel: UILabel!
     @IBOutlet weak var lidarButton: UIButton!
     @IBOutlet weak var depthMVSButton: UIButton!
+    @IBOutlet weak var depthViewButton: UIButton!
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -34,6 +35,9 @@ class OptionSelectionController: UIViewController {
         
         // Set up Depth MVS button  
         setupButton(depthMVSButton, title: "Depth MVS", isEnabled: true)
+        
+        // Set up Depth View button
+        setupButton(depthViewButton, title: "Depth View", isEnabled: true)
     }
     
     private func setupButton(_ button: UIButton, title: String, isEnabled: Bool) {
@@ -63,6 +67,11 @@ class OptionSelectionController: UIViewController {
         performSegue(withIdentifier: "showDepthMVS", sender: self)
     }
     
+    @IBAction func depthViewButtonTapped(_ sender: UIButton) {
+        // Navigate to the Depth View mode
+        performSegue(withIdentifier: "showDepthView", sender: self)
+    }
+    
     // MARK: - Navigation
     override func prepare(for segue: UIStoryboardSegue, sender: Any?) {
         if let mainController = segue.destination as? MainController {
@@ -71,6 +80,8 @@ class OptionSelectionController: UIViewController {
                 mainController.depthSource = .lidar
             case "showDepthMVS":
                 mainController.depthSource = .mvs
+            case "showDepthView":
+                mainController.depthSource = .depthView
             default:
                 break
             }

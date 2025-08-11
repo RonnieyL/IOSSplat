@@ -131,6 +131,37 @@ vertex RGBVertexOut rgbVertex(uint vertexID [[vertex_id]],
     return out;
 }
 
+fragment float4 depthViewFragment(RGBVertexOut in [[stage_in]],
+                                 constant RGBUniforms &uniforms [[buffer(0)]],
+                                 texture2d<float, access::sample> capturedImageTextureY [[texture(kTextureY)]],
+                                 texture2d<float, access::sample> capturedImageTextureCbCr [[texture(kTextureCbCr)]],
+                                 texture2d<float, access::sample> depthTexture [[texture(kTextureDepth)]]) {
+    
+    const float4 ycbcr = float4(capturedImageTextureY.sample(colorSampler, in.texCoord).r, capturedImageTextureCbCr.sample(colorSampler, in.texCoord).rg, 1);
+    const float4 rgb = yCbCrToRGB * ycbcr;
+    
+    // Sample depth and normalize to 0-1 range for visualization
+    const float depth = depthTexture.sample(colorSampler, in.texCoord).r;
+    const float normalizedDepth = saturate(depth / 10.0f); // Assume max depth of 10m for visualization
+    
+    // Create depth visualization: closer = warmer colors, farther = cooler colors
+    float3 depthColor = float3(0, 0, 0);
+    if (depth > 0.001f) {
+        // Heat map: blue (far) -> green -> yellow -> red (close)
+        float hue = (1.0f - normalizedDepth) * 0.7f; // 0.7 = blue to red range
+        depthColor = float3(
+            saturate(abs(hue * 6.0f - 3.0f) - 1.0f),
+            saturate(2.0f - abs(hue * 6.0f - 2.0f)),
+            saturate(2.0f - abs(hue * 6.0f - 4.0f))
+        );
+    }
+    
+    // Blend camera feed with depth visualization (50/50 mix)
+    const float3 blended = mix(rgb.rgb, depthColor, 0.6f);
+    
+    return float4(blended, 1.0f);
+}
+
 fragment float4 rgbFragment(RGBVertexOut in [[stage_in]],
                             constant RGBUniforms &uniforms [[buffer(0)]],
                             texture2d<float, access::sample> capturedImageTextureY [[texture(kTextureY)]],

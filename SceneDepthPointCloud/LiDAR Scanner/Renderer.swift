@@ -11,11 +11,13 @@ import CoreImage
 enum DepthSource {
     case lidar
     case mvs
+    case depthView
     
     var displayName: String {
         switch self {
         case .lidar: return "LiDAR Scanner"
         case .mvs: return "Depth MVS"
+        case .depthView: return "Depth View"
         }
     }
 }
@@ -79,6 +81,7 @@ final class Renderer {
     private lazy var unprojectPipelineState = makeUnprojectionPipelineState()!
     private lazy var unprojectMVSPipelineState = makeUnprojectionMVSPipelineState()!
     private lazy var rgbPipelineState = makeRGBPipelineState()!
+    private lazy var depthViewPipelineState = makeDepthViewPipelineState()!
     private lazy var particlePipelineState = makeParticlePipelineState()!
     // texture cache for captured image
     private lazy var textureCache = makeTextureCache()
@@ -269,6 +272,10 @@ final class Renderer {
                 if updateMVSDepthTextures(frame: currentFrame) {
                     accumulatePointsMVS(frame: currentFrame, commandBuffer: commandBuffer, renderEncoder: renderEncoder)
                 }
+            case .depthView:
+                if updateMVSDepthTextures(frame: currentFrame) {
+                    renderDepthView(commandBuffer: commandBuffer, renderEncoder: renderEncoder)
+                }
             }
         }
         
@@ -414,6 +421,28 @@ final class Renderer {
         currentPointIndex = (currentPointIndex + gridPointsBuffer.count) % maxPoints
         currentPointCount = min(currentPointCount + gridPointsBuffer.count, maxPoints)
         lastCameraTransform = frame.camera.transform
+    }
+    
+    private func renderDepthView(commandBuffer: MTLCommandBuffer, renderEncoder: MTLRenderCommandEncoder) {
+        guard let aiDepthTexture = aiDepthTexture else { return }
+        
+        // Render depth as grayscale overlay on camera feed
+        var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr]
+        var retainingAITexture = aiDepthTexture
+        
+        commandBuffer.addCompletedHandler { buffer in
+            retainingTextures.removeAll()
+            retainingAITexture = nil
+        }
+        
+        renderEncoder.setDepthStencilState(relaxedStencilState)
+        renderEncoder.setRenderPipelineState(depthViewPipelineState)
+        renderEncoder.setVertexBuffer(rgbUniformsBuffers[currentBufferIndex])
+        renderEncoder.setFragmentBuffer(rgbUniformsBuffers[currentBufferIndex])
+        renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(capturedImageTextureY!), index: Int(kTextureY.rawValue))
+        renderEncoder.setFragmentTexture(CVMetalTextureGetTexture(capturedImageTextureCbCr!), index: Int(kTextureCbCr.rawValue))
+        renderEncoder.setFragmentTexture(aiDepthTexture, index: Int(kTextureDepth.rawValue))
+        renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
     }
 }
 
@@ -703,6 +732,21 @@ private extension Renderer {
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = vertexFunction
         descriptor.isRasterizationEnabled = false
+        descriptor.depthAttachmentPixelFormat = renderDestination.depthStencilPixelFormat
+        descriptor.colorAttachments[0].pixelFormat = renderDestination.colorPixelFormat
+        
+        return try? device.makeRenderPipelineState(descriptor: descriptor)
+    }
+    
+    func makeDepthViewPipelineState() -> MTLRenderPipelineState? {
+        guard let vertexFunction = library.makeFunction(name: "rgbVertex"),
+              let fragmentFunction = library.makeFunction(name: "depthViewFragment") else {
+                return nil
+        }
+        
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
         descriptor.depthAttachmentPixelFormat = renderDestination.depthStencilPixelFormat
         descriptor.colorAttachments[0].pixelFormat = renderDestination.colorPixelFormat
         

@@ -62,10 +62,28 @@
                             <constraint firstItem="OSC-MVS-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-MVS-Leading-123"/>
                             <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-MVS-123" secondAttribute="trailing" constant="50" id="OSC-MVS-Trailing-123"/>
                             <constraint firstItem="OSC-MVS-123" firstAttribute="top" secondItem="OSC-LiDAR-123" secondAttribute="bottom" constant="40" id="OSC-MVS-Top-123"/>
+                            <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="OSC-DepthView-123">
+                                <rect key="frame" x="50" y="550" width="314" height="60"/>
+                                <constraints>
+                                    <constraint firstAttribute="height" constant="60" id="OSC-DepthView-Height-123"/>
+                                </constraints>
+                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="20"/>
+                                <state key="normal" title="Depth View">
+                                    <color key="titleColor" white="1" alpha="1" colorSpace="custom" customColorSpace="genericGamma22GrayColorSpace"/>
+                                </state>
+                                <connections>
+                                    <action selector="depthViewButtonTapped:" destination="OSC-ID-123" eventType="touchUpInside" id="OSC-DepthView-Action-123"/>
+                                    <segue destination="BV1-FR-VrT" kind="show" identifier="showDepthView" id="OSC-DepthView-Segue-123"/>
+                                </connections>
+                            </button>
+                            <constraint firstItem="OSC-DepthView-123" firstAttribute="leading" secondItem="OSC-SafeArea-123" secondAttribute="leading" constant="50" id="OSC-DepthView-Leading-123"/>
+                            <constraint firstItem="OSC-SafeArea-123" firstAttribute="trailing" secondItem="OSC-DepthView-123" secondAttribute="trailing" constant="50" id="OSC-DepthView-Trailing-123"/>
+                            <constraint firstItem="OSC-DepthView-123" firstAttribute="top" secondItem="OSC-MVS-123" secondAttribute="bottom" constant="40" id="OSC-DepthView-Top-123"/>
                         </constraints>
                     </view>
                     <connections>
                         <outlet property="depthMVSButton" destination="OSC-MVS-123" id="OSC-MVS-Outlet-123"/>
+                        <outlet property="depthViewButton" destination="OSC-DepthView-123" id="OSC-DepthView-Outlet-123"/>
                         <outlet property="lidarButton" destination="OSC-LiDAR-123" id="OSC-LiDAR-Outlet-123"/>
                         <outlet property="titleLabel" destination="OSC-Title-123" id="OSC-Title-Outlet-123"/>
                     </connections>
