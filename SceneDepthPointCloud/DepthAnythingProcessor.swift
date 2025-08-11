@@ -96,7 +96,8 @@ class DepthAnythingProcessor {
         }
         
         if let rawDepthTexture = runVisionInference(on: preprocessedImage, with: visionModel) {
-            return normalizeDepthTexture(rawDepthTexture)
+            // Apply INRIA-style normalization for better point cloud quality
+            return applyINRIANormalization(rawDepthTexture)
         }
         return nil
     }
@@ -288,7 +289,108 @@ class DepthAnythingProcessor {
         return texture
     }
     
-    // MARK: - Depth Normalization (matching reference implementation)
+    // MARK: - INRIA-Style Depth Normalization (computationally expensive but accurate)
+    private func applyINRIANormalization(_ depthTexture: MTLTexture) -> MTLTexture? {
+        // Step 1: Calculate median and MAD (Median Absolute Deviation) like INRIA
+        guard let statistics = calculateDepthStatistics(depthTexture) else {
+            return normalizeDepthTexture(depthTexture)  // Fallback to simple normalization
+        }
+        
+        // Step 2: Apply INRIA normalization: (depth - median) / MAD
+        return applyStatisticalNormalization(depthTexture, median: statistics.median, mad: statistics.mad)
+    }
+    
+    private struct DepthStatistics {
+        let median: Float
+        let mad: Float
+    }
+    
+    private func calculateDepthStatistics(_ depthTexture: MTLTexture) -> DepthStatistics? {
+        // Read texture data to CPU for statistical analysis
+        let width = depthTexture.width
+        let height = depthTexture.height
+        let bytesPerRow = width * MemoryLayout<Float>.stride
+        let totalBytes = height * bytesPerRow
+        
+        var depthData = [Float](repeating: 0, count: width * height)
+        let region = MTLRegionMake2D(0, 0, width, height)
+        
+        depthTexture.getBytes(&depthData, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
+        
+        // Filter out invalid depths (0 or very small values)
+        let validDepths = depthData.filter { $0 > 0.001 }
+        guard !validDepths.isEmpty else { return nil }
+        
+        // Calculate median (INRIA's robust center measure)
+        let sortedDepths = validDepths.sorted()
+        let median = sortedDepths.count % 2 == 0 ?
+            (sortedDepths[sortedDepths.count/2 - 1] + sortedDepths[sortedDepths.count/2]) / 2 :
+            sortedDepths[sortedDepths.count/2]
+        
+        // Calculate MAD (Median Absolute Deviation - INRIA's robust scale measure)
+        let absoluteDeviations = validDepths.map { abs($0 - median) }
+        let sortedDeviations = absoluteDeviations.sorted()
+        let mad = sortedDeviations.count % 2 == 0 ?
+            (sortedDeviations[sortedDeviations.count/2 - 1] + sortedDeviations[sortedDeviations.count/2]) / 2 :
+            sortedDeviations[sortedDeviations.count/2]
+        
+        // Prevent division by zero
+        let safeMad = max(mad, 0.001)
+        
+        print("📊 Depth Statistics - Median: \(median), MAD: \(safeMad)")
+        
+        return DepthStatistics(median: median, mad: safeMad)
+    }
+    
+    private func applyStatisticalNormalization(_ depthTexture: MTLTexture, median: Float, mad: Float) -> MTLTexture? {
+        // Create compute shader for INRIA-style normalization
+        guard let library = metalDevice.makeDefaultLibrary(),
+              let function = library.makeFunction(name: "inriaNormalizeDepth"),
+              let pipelineState = try? metalDevice.makeComputePipelineState(function: function) else {
+            print("⚠️ Could not create INRIA normalization pipeline, using simple normalization")
+            return normalizeDepthTexture(depthTexture)
+        }
+        
+        // Create output texture
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: depthTexture.pixelFormat,
+            width: depthTexture.width,
+            height: depthTexture.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        
+        guard let normalizedTexture = metalDevice.makeTexture(descriptor: descriptor),
+              let commandBuffer = metalDevice.makeCommandQueue()?.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return depthTexture
+        }
+        
+        // Pass statistics to shader
+        var params = SIMD4<Float>(median, mad, 0, 0)
+        
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setTexture(depthTexture, index: 0)
+        encoder.setTexture(normalizedTexture, index: 1)
+        encoder.setBytes(&params, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        
+        let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadgroups = MTLSize(
+            width: (depthTexture.width + threadgroupSize.width - 1) / threadgroupSize.width,
+            height: (depthTexture.height + threadgroupSize.height - 1) / threadgroupSize.height,
+            depth: 1
+        )
+        
+        encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        return normalizedTexture
+    }
+    
+    // MARK: - Fallback Simple Normalization
     private func normalizeDepthTexture(_ depthTexture: MTLTexture) -> MTLTexture? {
         // Create compute shader for depth normalization
         guard let library = metalDevice.makeDefaultLibrary(),
