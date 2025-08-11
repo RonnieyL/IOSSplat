@@ -1,6 +1,6 @@
 //
 //  DepthAnythingProcessor.swift
-//  SceneDepthPointCloud - Depth MVS
+//  SceneDepthPointCloud
 //
 //  CoreML Depth-Anything-V2 integration for real-time depth estimation
 //
@@ -39,7 +39,7 @@ class DepthAnythingProcessor {
             self.isModelLoaded = true
             print("✅ Depth-Anything-V2 model loaded successfully")
         } else {
-            print("⚠️ Depth-Anything-V2 model not found. Using fallback depth estimation.")
+            print("⚠️ Depth-Anything-V2 model not found. MVS mode will use synthetic depth.")
             self.isModelLoaded = false
         }
     }

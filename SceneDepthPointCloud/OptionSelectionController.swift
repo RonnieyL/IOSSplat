@@ -62,4 +62,18 @@ class OptionSelectionController: UIViewController {
         // Navigate to the Depth MVS scanner
         performSegue(withIdentifier: "showDepthMVS", sender: self)
     }
+    
+    // MARK: - Navigation
+    override func prepare(for segue: UIStoryboardSegue, sender: Any?) {
+        if let mainController = segue.destination as? MainController {
+            switch segue.identifier {
+            case "showLiDARScanner":
+                mainController.depthSource = .lidar
+            case "showDepthMVS":
+                mainController.depthSource = .mvs
+            default:
+                break
+            }
+        }
+    }
 }

@@ -7,6 +7,18 @@ import MetalKit
 import ARKit
 import CoreImage
 
+// MARK: - Depth Source Selection
+enum DepthSource {
+    case lidar
+    case mvs
+    
+    var displayName: String {
+        switch self {
+        case .lidar: return "LiDAR Scanner"
+        case .mvs: return "Depth MVS"
+        }
+    }
+}
 
 // MARK: - Core Metal Scan Renderer
 final class Renderer {
@@ -65,6 +77,7 @@ final class Renderer {
     private let depthStencilState: MTLDepthStencilState
     private var commandQueue: MTLCommandQueue
     private lazy var unprojectPipelineState = makeUnprojectionPipelineState()!
+    private lazy var unprojectMVSPipelineState = makeUnprojectionMVSPipelineState()!
     private lazy var rgbPipelineState = makeRGBPipelineState()!
     private lazy var particlePipelineState = makeParticlePipelineState()!
     // texture cache for captured image
@@ -118,6 +131,17 @@ final class Renderer {
     // interfaces
     var confidenceThreshold = 2
     
+    // Depth source selection
+    var depthSource: DepthSource = .lidar {
+        didSet {
+            print("Switched to \(depthSource.displayName)")
+        }
+    }
+    
+    // MVS-specific components
+    private var depthAnythingProcessor: DepthAnythingProcessor?
+    private var aiDepthTexture: MTLTexture?
+    
     var rgbOn: Bool = false {
         didSet {
             // apply the change for the shader
@@ -149,6 +173,10 @@ final class Renderer {
         depthStencilState = device.makeDepthStencilState(descriptor: depthStateDescriptor)!
         
         inFlightSemaphore = DispatchSemaphore(value: maxInFlightBuffers)
+        
+        // Initialize Depth-Anything processor for MVS mode
+        depthAnythingProcessor = DepthAnythingProcessor(metalDevice: device)
+        
         self.loadSavedClouds()
     }
     
@@ -177,6 +205,17 @@ final class Renderer {
         confidenceTexture = makeTexture(fromPixelBuffer: confidenceMap, pixelFormat: .r8Uint, planeIndex: 0)
         
         return true
+    }
+    
+    private func updateMVSDepthTextures(frame: ARFrame) -> Bool {
+        guard let depthAnythingProcessor = depthAnythingProcessor else {
+            print("⚠️ DepthAnythingProcessor not initialized")
+            return false
+        }
+        
+        // Get AI depth texture synchronously for real-time performance
+        aiDepthTexture = depthAnythingProcessor.processDepthSync(from: frame)
+        return aiDepthTexture != nil
     }
     
     private func update(frame: ARFrame) {
@@ -219,9 +258,18 @@ final class Renderer {
             extractCameraData(frame: currentFrame)
         }
         
-        // Only process LiDAR/point cloud data at the throttled rate
-        if shouldProcessLiDARThisFrame(currentFrame) && shouldAccumulate(frame: currentFrame), updateDepthTextures(frame: currentFrame) {
-            accumulatePoints(frame: currentFrame, commandBuffer: commandBuffer, renderEncoder: renderEncoder)
+        // Only process depth/point cloud data at the throttled rate
+        if shouldProcessLiDARThisFrame(currentFrame) && shouldAccumulate(frame: currentFrame) {
+            switch depthSource {
+            case .lidar:
+                if updateDepthTextures(frame: currentFrame) {
+                    accumulatePoints(frame: currentFrame, commandBuffer: commandBuffer, renderEncoder: renderEncoder)
+                }
+            case .mvs:
+                if updateMVSDepthTextures(frame: currentFrame) {
+                    accumulatePointsMVS(frame: currentFrame, commandBuffer: commandBuffer, renderEncoder: renderEncoder)
+                }
+            }
         }
         
         // check and render rgb camera image
@@ -321,6 +369,44 @@ final class Renderer {
         renderEncoder.setVertexTexture(CVMetalTextureGetTexture(capturedImageTextureCbCr!), index: Int(kTextureCbCr.rawValue))
         renderEncoder.setVertexTexture(CVMetalTextureGetTexture(depthTexture!), index: Int(kTextureDepth.rawValue))
         renderEncoder.setVertexTexture(CVMetalTextureGetTexture(confidenceTexture!), index: Int(kTextureConfidence.rawValue))
+        renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: gridPointsBuffer.count)
+        
+        currentPointIndex = (currentPointIndex + gridPointsBuffer.count) % maxPoints
+        currentPointCount = min(currentPointCount + gridPointsBuffer.count, maxPoints)
+        lastCameraTransform = frame.camera.transform
+    }
+    
+    private func accumulatePointsMVS(frame: ARFrame, commandBuffer: MTLCommandBuffer, renderEncoder: MTLRenderCommandEncoder) {
+        pointCloudUniforms.pointCloudCurrentIndex = Int32(currentPointIndex)
+        
+        var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr, aiDepthTexture]
+        
+        commandBuffer.addCompletedHandler { buffer in
+            retainingTextures.removeAll()
+            // copy gpu point buffer to cpu
+            var i = self.cpuParticlesBuffer.count
+            while (i < self.maxPoints && self.particlesBuffer[i].position != simd_float3(0.0,0.0,0.0)) {
+                let position = self.particlesBuffer[i].position
+                let color = self.particlesBuffer[i].color
+                let confidence = self.particlesBuffer[i].confidence
+                if confidence == 2 { self.highConfCount += 1 }
+                self.cpuParticlesBuffer.append(
+                    CPUParticle(position: position,
+                                color: color,
+                                confidence: confidence))
+                i += 1
+            }
+        }
+        
+        renderEncoder.setDepthStencilState(relaxedStencilState)
+        renderEncoder.setRenderPipelineState(unprojectMVSPipelineState)
+        renderEncoder.setVertexBuffer(pointCloudUniformsBuffers[currentBufferIndex])
+        renderEncoder.setVertexBuffer(particlesBuffer)
+        renderEncoder.setVertexBuffer(gridPointsBuffer)
+        renderEncoder.setVertexTexture(CVMetalTextureGetTexture(capturedImageTextureY!), index: Int(kTextureY.rawValue))
+        renderEncoder.setVertexTexture(CVMetalTextureGetTexture(capturedImageTextureCbCr!), index: Int(kTextureCbCr.rawValue))
+        renderEncoder.setVertexTexture(CVMetalTextureGetTexture(aiDepthTexture!), index: Int(kTextureDepth.rawValue))
+        // Note: MVS doesn't have confidence texture - shader will generate confidence = 2
         renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: gridPointsBuffer.count)
         
         currentPointIndex = (currentPointIndex + gridPointsBuffer.count) % maxPoints
@@ -595,6 +681,20 @@ extension Renderer {
 private extension Renderer {
     func makeUnprojectionPipelineState() -> MTLRenderPipelineState? {
         guard let vertexFunction = library.makeFunction(name: "unprojectVertex") else {
+                return nil
+        }
+        
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.isRasterizationEnabled = false
+        descriptor.depthAttachmentPixelFormat = renderDestination.depthStencilPixelFormat
+        descriptor.colorAttachments[0].pixelFormat = renderDestination.colorPixelFormat
+        
+        return try? device.makeRenderPipelineState(descriptor: descriptor)
+    }
+    
+    func makeUnprojectionMVSPipelineState() -> MTLRenderPipelineState? {
+        guard let vertexFunction = library.makeFunction(name: "unprojectVertexMVS") else {
                 return nil
         }
         

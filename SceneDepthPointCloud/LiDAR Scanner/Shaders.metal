@@ -63,6 +63,38 @@ vertex void unprojectVertex(uint vertexID [[vertex_id]],
     particleUniforms[currentPointIndex].confidence = confidence;
 }
 
+///  MVS Vertex shader that takes in a 2D grid-point and infers its 3D position using AI depth
+vertex void unprojectVertexMVS(uint vertexID [[vertex_id]],
+                               constant PointCloudUniforms &uniforms [[buffer(kPointCloudUniforms)]],
+                               device ParticleUniforms *particleUniforms [[buffer(kParticleUniforms)]],
+                               constant float2 *gridPoints [[buffer(kGridPoints)]],
+                               texture2d<float, access::sample> capturedImageTextureY [[texture(kTextureY)]],
+                               texture2d<float, access::sample> capturedImageTextureCbCr [[texture(kTextureCbCr)]],
+                               texture2d<float, access::sample> aiDepthTexture [[texture(kTextureDepth)]]) {
+    
+    const auto gridPoint = gridPoints[vertexID];
+    const auto currentPointIndex = (uniforms.pointCloudCurrentIndex + vertexID) % uniforms.maxPoints;
+    const auto texCoord = gridPoint / uniforms.cameraResolution;
+    
+    // Sample the AI depth map to get the depth value
+    const auto depth = aiDepthTexture.sample(colorSampler, texCoord).r;
+    
+    // With a 2D point plus depth, we can now get its 3D position
+    const auto position = worldPoint(gridPoint, depth, uniforms.cameraIntrinsicsInversed, uniforms.localToWorld);
+    
+    // Sample Y and CbCr textures to get the YCbCr color at the given texture coordinate
+    const auto ycbcr = float4(capturedImageTextureY.sample(colorSampler, texCoord).r, capturedImageTextureCbCr.sample(colorSampler, texCoord.xy).rg, 1);
+    const auto sampledColor = (yCbCrToRGB * ycbcr).rgb;
+    
+    // MVS points get high confidence by default
+    const auto confidence = 2.0;
+    
+    // Write the data to the buffer
+    particleUniforms[currentPointIndex].position = position.xyz;
+    particleUniforms[currentPointIndex].color = sampledColor;
+    particleUniforms[currentPointIndex].confidence = confidence;
+}
+
 vertex RGBVertexOut rgbVertex(uint vertexID [[vertex_id]],
                               constant RGBUniforms &uniforms [[buffer(0)]]) {
     const float3 texCoord = float3(viewTexCoords[vertexID], 1) * uniforms.viewToCamera;

@@ -16,6 +16,9 @@ final class MainController: UIViewController, ARSessionDelegate {
     var renderer: Renderer!
     private  var isPaused = false
     
+    // Depth source configuration (set via segue or default to LiDAR)
+    var depthSource: DepthSource = .lidar
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -36,8 +39,12 @@ final class MainController: UIViewController, ARSessionDelegate {
             renderer = Renderer(session: session, metalDevice: device, renderDestination: view)
             renderer.drawRectResized(size: view.bounds.size)
             
-            // Set initial LiDAR processing rate to 3 FPS
+            // Set depth source and initial processing rate
+            renderer.depthSource = depthSource
             renderer.lidarProcessingFPS = 3.0
+            
+            // Update navigation title based on depth source
+            self.title = depthSource.displayName
         }
         
         clearButton = createButton(mainView: self, iconName: "trash.circle.fill",
@@ -108,10 +115,19 @@ final class MainController: UIViewController, ARSessionDelegate {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         
-        // Create a world-tracking configuration, and
-        // enable the scene depth frame-semantic.
+        // Create a world-tracking configuration
         let configuration = ARWorldTrackingConfiguration()
-        configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
+        
+        // Configure frame semantics based on depth source
+        switch depthSource {
+        case .lidar:
+            // Enable scene depth for LiDAR
+            configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
+        case .mvs:
+            // No LiDAR needed for MVS - using AI depth
+            configuration.frameSemantics = []
+        }
+        
         // Run the view's session
         session.run(configuration)
         
