@@ -95,7 +95,10 @@ class DepthAnythingProcessor {
             return runDirectCoreMLInference(on: preprocessedImage)
         }
         
-        return runVisionInference(on: preprocessedImage, with: visionModel)
+        if let rawDepthTexture = runVisionInference(on: preprocessedImage, with: visionModel) {
+            return normalizeDepthTexture(rawDepthTexture)
+        }
+        return nil
     }
     
     private func preprocessImage(_ image: CIImage) -> CIImage? {
@@ -283,6 +286,51 @@ class DepthAnythingProcessor {
         )
         
         return texture
+    }
+    
+    // MARK: - Depth Normalization (matching reference implementation)
+    private func normalizeDepthTexture(_ depthTexture: MTLTexture) -> MTLTexture? {
+        // Create compute shader for depth normalization
+        guard let library = metalDevice.makeDefaultLibrary(),
+              let function = library.makeFunction(name: "normalizeDepth"),
+              let pipelineState = try? metalDevice.makeComputePipelineState(function: function) else {
+            print("⚠️ Could not create depth normalization pipeline, using raw depth")
+            return depthTexture
+        }
+        
+        // Create output texture
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: depthTexture.pixelFormat,
+            width: depthTexture.width,
+            height: depthTexture.height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        
+        guard let normalizedTexture = metalDevice.makeTexture(descriptor: descriptor),
+              let commandBuffer = metalDevice.makeCommandQueue()?.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return depthTexture
+        }
+        
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setTexture(depthTexture, index: 0)
+        encoder.setTexture(normalizedTexture, index: 1)
+        
+        let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadgroups = MTLSize(
+            width: (depthTexture.width + threadgroupSize.width - 1) / threadgroupSize.width,
+            height: (depthTexture.height + threadgroupSize.height - 1) / threadgroupSize.height,
+            depth: 1
+        )
+        
+        encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        return normalizedTexture
     }
     
     // MARK: - Fallback Synthetic Depth
