@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>The camera is used for augmenting reality.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save depth map images to Photos.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

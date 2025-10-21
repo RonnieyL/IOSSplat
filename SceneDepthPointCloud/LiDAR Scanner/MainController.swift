@@ -3,6 +3,23 @@ import Metal
 import MetalKit
 import ARKit
 
+enum DepthSource {
+    case lidar      // Hardware LiDAR scanner
+    case mvs        // PromptDA AI depth with LoG sampling
+    case depthView  // Visualization mode (future)
+    
+    var displayName: String {
+        switch self {
+        case .lidar:
+            return "LiDAR Scanner"
+        case .mvs:
+            return "Depth MVS (PromptDA)"
+        case .depthView:
+            return "Depth View"
+        }
+    }
+}
+
 final class MainController: UIViewController, ARSessionDelegate {
     private let isUIEnabled = true
     private var clearButton = UIButton(type: .system)
@@ -21,10 +38,16 @@ final class MainController: UIViewController, ARSessionDelegate {
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        
+        print("\n📱 MainController.viewDidLoad()")
+        print("   • Depth source: \(depthSource) (\(depthSource.displayName))")
+        
         guard let device = MTLCreateSystemDefaultDevice() else {
-            print("Metal is not supported on this device")
+            print("❌ Metal is not supported on this device")
             return
         }
+        
+        print("   • Metal device: \(device.name)")
         
         session.delegate = self
         // Set the view to use the default device
@@ -36,15 +59,18 @@ final class MainController: UIViewController, ARSessionDelegate {
             view.contentScaleFactor = 1
             view.delegate = self
             // Configure the renderer to draw to the view
+            print("   • Initializing Renderer...")
             renderer = Renderer(session: session, metalDevice: device, renderDestination: view)
             renderer.drawRectResized(size: view.bounds.size)
             
             // Set depth source and initial processing rate
+            print("   • Setting renderer depth source to: \(depthSource)")
             renderer.depthSource = depthSource
             renderer.lidarProcessingFPS = 3.0
             
             // Update navigation title based on depth source
             self.title = depthSource.displayName
+            print("✅ MainController setup complete\n")
         }
         
         clearButton = createButton(mainView: self, iconName: "trash.circle.fill",
@@ -115,6 +141,9 @@ final class MainController: UIViewController, ARSessionDelegate {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         
+        print("\n🎬 MainController.viewWillAppear()")
+        print("   • Depth source: \(depthSource) (\(depthSource.displayName))")
+        
         // Create a world-tracking configuration
         let configuration = ARWorldTrackingConfiguration()
         
@@ -122,14 +151,27 @@ final class MainController: UIViewController, ARSessionDelegate {
         switch depthSource {
         case .lidar:
             // Enable scene depth for LiDAR
+            print("   • Configuring ARSession for LiDAR mode")
+            print("   • Frame semantics: sceneDepth + smoothedSceneDepth")
             configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
-        case .mvs, .depthView:
-            // No LiDAR needed for MVS/DepthView - using AI depth
-            configuration.frameSemantics = []
+            
+        case .mvs:
+            // MVS needs smoothed scene depth for PromptDA prompt input
+            print("   • Configuring ARSession for MVS mode (PromptDA)")
+            print("   • Frame semantics: smoothedSceneDepth (for LiDAR prompt)")
+            configuration.frameSemantics = [.smoothedSceneDepth]
+            
+        case .depthView:
+            // DepthView might need depth for visualization
+            print("   • Configuring ARSession for DepthView mode")
+            print("   • Frame semantics: smoothedSceneDepth")
+            configuration.frameSemantics = [.smoothedSceneDepth]
         }
         
         // Run the view's session
+        print("   • Starting ARSession...")
         session.run(configuration)
+        print("✅ ARSession started\n")
         
         // The screen shouldn't dim during AR experiences.
         UIApplication.shared.isIdleTimerDisabled = true

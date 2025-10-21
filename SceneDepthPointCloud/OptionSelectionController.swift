@@ -30,14 +30,14 @@ class OptionSelectionController: UIViewController {
         titleLabel.textAlignment = .center
         titleLabel.textColor = .label
         
-        // Set up LiDAR button
+        // Set up LiDAR button (ENABLED - main app)
         setupButton(lidarButton, title: "LiDAR Scanner", isEnabled: true)
         
-        // Set up Depth MVS button  
+        // Set up Depth MVS button (ENABLED - PromptDA + LoG sampling)
         setupButton(depthMVSButton, title: "Depth MVS", isEnabled: true)
         
-        // Set up Depth View button
-        setupButton(depthViewButton, title: "Depth View", isEnabled: true)
+        // Set up Depth View button (DISABLED)
+        setupButton(depthViewButton, title: "Depth View (Coming Soon)", isEnabled: false)
     }
     
     private func setupButton(_ button: UIButton, title: String, isEnabled: Bool) {
@@ -63,13 +63,23 @@ class OptionSelectionController: UIViewController {
     }
     
     @IBAction func depthMVSButtonTapped(_ sender: UIButton) {
-        // Navigate to the Depth MVS scanner
+        // Navigate to MVS mode with PromptDA depth + LoG sampling
         performSegue(withIdentifier: "showDepthMVS", sender: self)
     }
     
     @IBAction func depthViewButtonTapped(_ sender: UIButton) {
-        // Navigate to the Depth View mode
-        performSegue(withIdentifier: "showDepthView", sender: self)
+        // Disabled - show blank page or do nothing
+        showComingSoonAlert(feature: "Depth View")
+    }
+    
+    private func showComingSoonAlert(feature: String) {
+        let alert = UIAlertController(
+            title: "\(feature) - Coming Soon",
+            message: "This feature is currently under development.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
     
     // MARK: - Navigation
@@ -77,12 +87,13 @@ class OptionSelectionController: UIViewController {
         if let mainController = segue.destination as? MainController {
             switch segue.identifier {
             case "showLiDARScanner":
+                // LiDAR scanner mode
                 mainController.depthSource = .lidar
             case "showDepthMVS":
+                // MVS mode with PromptDA depth + LoG sampling
                 mainController.depthSource = .mvs
-            case "showDepthView":
-                mainController.depthSource = .depthView
             default:
+                // Other options are disabled
                 break
             }
         }
