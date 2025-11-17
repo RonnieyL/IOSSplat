@@ -63,6 +63,90 @@ vertex void unprojectVertex(uint vertexID [[vertex_id]],
     particleUniforms[currentPointIndex].confidence = confidence;
 }
 
+/// Convert quaternion to 3x3 rotation matrix
+static float3x3 quaternionToMatrix(float4 q) {
+    // Normalize quaternion
+    q = normalize(q);
+    float x = q.x, y = q.y, z = q.z, w = q.w;
+
+    // Convert to rotation matrix
+    return float3x3(
+        1 - 2*(y*y + z*z),     2*(x*y - w*z),     2*(x*z + w*y),
+            2*(x*y + w*z), 1 - 2*(x*x + z*z),     2*(y*z - w*x),
+            2*(x*z - w*y),     2*(y*z + w*x), 1 - 2*(x*x + y*y)
+    );
+}
+
+/// Compute 3D covariance matrix from scale and rotation
+static void computeCovariance(float3 scale, float4 rotation, thread half3 &covA, thread half3 &covB) {
+    // Convert quaternion to rotation matrix
+    float3x3 R = quaternionToMatrix(rotation);
+
+    // Create scale matrix
+    float3x3 S = float3x3(
+        scale.x, 0, 0,
+        0, scale.y, 0,
+        0, 0, scale.z
+    );
+
+    // Compute transformation matrix: R * S
+    float3x3 transform = R * S;
+
+    // Compute 3D covariance: transform * transform^T
+    float3x3 cov3D = transform * transpose(transform);
+
+    // Pack covariance matrix (symmetric, so only store 6 unique values)
+    // covA = upper triangle: (0,0), (0,1), (0,2)
+    // covB = lower triangle: (1,1), (1,2), (2,2)
+    covA = half3(cov3D[0][0], cov3D[0][1], cov3D[0][2]);
+    covB = half3(cov3D[1][1], cov3D[1][2], cov3D[2][2]);
+}
+
+/// Vertex shader that populates Gaussian buffer from LiDAR depth data
+/// Now outputs covariance directly in SplatRenderer-compatible format
+vertex void unprojectVertexGaussian(uint vertexID [[vertex_id]],
+                                    constant PointCloudUniforms &uniforms [[buffer(kPointCloudUniforms)]],
+                                    device GaussianUniforms *gaussians [[buffer(kGaussianUniforms)]],
+                                    constant float2 *gridPoints [[buffer(kGridPoints)]],
+                                    texture2d<float, access::sample> capturedImageTextureY [[texture(kTextureY)]],
+                                    texture2d<float, access::sample> capturedImageTextureCbCr [[texture(kTextureCbCr)]],
+                                    texture2d<float, access::sample> depthTexture [[texture(kTextureDepth)]],
+                                    texture2d<unsigned int, access::sample> confidenceTexture [[texture(kTextureConfidence)]]) {
+
+    const auto gridPoint = gridPoints[vertexID];
+    const auto currentPointIndex = (uniforms.pointCloudCurrentIndex + vertexID) % uniforms.maxPoints;
+    const auto texCoord = gridPoint / uniforms.cameraResolution;
+
+    // Sample the depth map to get the depth value
+    const auto depth = depthTexture.sample(colorSampler, texCoord).r;
+
+    // With a 2D point plus depth, we can now get its 3D position
+    const auto position = worldPoint(gridPoint, depth, uniforms.cameraIntrinsicsInversed, uniforms.localToWorld);
+
+    // Sample Y and CbCr textures to get the YCbCr color at the given texture coordinate
+    const auto ycbcr = float4(capturedImageTextureY.sample(colorSampler, texCoord).r,
+                              capturedImageTextureCbCr.sample(colorSampler, texCoord.xy).rg, 1);
+    const auto sampledColor = (yCbCrToRGB * ycbcr).rgb;
+
+    // Sample the confidence map to get the confidence value
+    const auto confidence = confidenceTexture.sample(colorSampler, texCoord).r;
+
+    // Compute covariance from scale and rotation
+    float3 scale = float3(0.01, 0.01, 0.01);  // Default small spherical Gaussian
+    float4 rotation = float4(0, 0, 0, 1);     // Identity quaternion (no rotation)
+
+    half3 covA, covB;
+    computeCovariance(scale, rotation, covA, covB);
+
+    // Write Gaussian data to buffer in SplatRenderer-compatible format
+    gaussians[currentPointIndex].position = position.xyz;
+    // sampledColor is already in 0-1 range from YCbCr->RGB conversion
+    // Pack as RGBA with confidence as alpha (confidence is 0-2, normalize to 0-1)
+    gaussians[currentPointIndex].color = half4(half3(sampledColor), half(confidence / 2.0));
+    gaussians[currentPointIndex].covA = covA;
+    gaussians[currentPointIndex].covB = covB;
+}
+
 ///  MVS Vertex shader that takes in a 2D grid-point and infers its 3D position using AI depth
 vertex void unprojectVertexMVS(uint vertexID [[vertex_id]],
                                constant PointCloudUniforms &uniforms [[buffer(kPointCloudUniforms)]],

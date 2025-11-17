@@ -114,7 +114,18 @@ extension MTLRenderCommandEncoder {
 
 struct Texture: Resource {
     typealias Element = Any
-    
+
     let texture: MTLTexture
     let index: Int
+}
+
+// MARK: - Blit Encoder Extension for GPU-to-GPU copies
+extension MTLBlitCommandEncoder {
+    func copy<T>(from source: MetalBuffer<T>, sourceOffset: Int = 0,
+                 to destination: MetalBuffer<T>, destinationOffset: Int = 0,
+                 size: Int) {
+        self.copy(from: source.buffer, sourceOffset: sourceOffset,
+                  to: destination.buffer, destinationOffset: destinationOffset,
+                  size: size)
+    }
 }
