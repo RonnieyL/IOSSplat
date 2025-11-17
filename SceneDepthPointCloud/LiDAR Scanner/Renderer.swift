@@ -22,7 +22,7 @@ final class Renderer {
     // Maximum number of points we store in the point cloud
     private let maxPoints = 15_000_000
     // Number of sample points on the grid
-    var numGridPoints = 2_000
+    var numGridPoints = 2_200  // Increased by 10% from 2000
     // Particle's size in pixels
     private let particleSize: Float = 8
 
@@ -382,27 +382,22 @@ final class Renderer {
             print("   • PromptDA output depth: \(depthW)×\(depthH)")
             print("   • LoG probability map: \(probW)×\(probH)")
             
-            // TEMPORARILY DISABLED: Use uniform hexagonal grid instead of LoG probability sampling
-            // This gives better coverage across the entire depth map
-            // TODO: Improve LoG sampling to avoid clustering
-            /*
+            // Use LoG probability sampling for intelligent point placement
             let pixels = ProbabilitySampler.samplePixels(probPB: output.probPB, count: numGridPoints, unique: true)
             
-            print("   • Sampled \(pixels.count) points from probability distribution")
+            print("   • Sampled \(pixels.count) points from LoG probability distribution")
             
-            // Convert probability samples to camera resolution coordinates
-            let scaleX = Float(cameraResolution.x) / Float(depthW)
-            let scaleY = Float(cameraResolution.y) / Float(depthH)
+            // Convert probability samples from PromptDA resolution to camera resolution
+            // PromptDA outputs at 518×518, but camera is 1920×1440
+            let scaleX = Float(cameraResolution.x) / Float(probW)
+            let scaleY = Float(cameraResolution.y) / Float(probH)
             print("   • Scaling samples to camera resolution: scaleX=\(String(format: "%.2f", scaleX)), scaleY=\(String(format: "%.2f", scaleY))")
             
             cachedProbSamples = pixels.map { pixel in
                 Float2(Float(pixel.x) * scaleX, Float(pixel.y) * scaleY)
             }
-            */
             
-            // Clear cached samples to use uniform hexagonal grid
-            cachedProbSamples = nil
-            print("   • Using uniform hexagonal grid sampling (\(numGridPoints) points)")
+            print("   • Final sample count for rendering: \(cachedProbSamples?.count ?? 0)")
             
             // Use high confidence for PromptDA points (or reuse LiDAR confidence if available)
             if let confMap = frame.smoothedSceneDepth?.confidenceMap {
@@ -588,8 +583,14 @@ final class Renderer {
             }
         }
         
-        // Note: Grid points buffer is created once at init, no need to regenerate
-        // In MVS mode, we use the same uniform hexagonal grid as LiDAR mode
+        // Regenerate grid points buffer if we have new probability samples (MVS mode)
+        if depthSource == .mvs && cachedProbSamples != nil {
+            let newPoints = makeGridPoints()
+            print("   • Regenerating grid points buffer: \(newPoints.count) LoG-sampled points")
+            gridPointsBuffer = MetalBuffer<Float2>(device: device,
+                                                  array: newPoints,
+                                                  index: kGridPoints.rawValue, options: [])
+        }
 
         renderEncoder.setDepthStencilState(relaxedStencilState)
         renderEncoder.setRenderPipelineState(unprojectPipelineState)

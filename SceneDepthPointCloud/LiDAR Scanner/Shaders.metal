@@ -269,6 +269,56 @@ fragment float4 particleFragment(ParticleVertexOut in [[stage_in]],
     if (in.color.a == 0 || distSquared > 0.25) {
         discard_fragment();
     }
-    
+
     return in.color;
+}
+
+// ============================================================================
+// LoG Probability Smoothing Kernel
+// ============================================================================
+
+/// Applies Gaussian smoothing to the Laplacian response map
+/// This matches the second convolution in get_lapla_norm: F.conv2d(laplacian_norm, kernel)
+kernel void smoothLaplacianResponse(
+    texture2d<float, access::read> inTexture [[texture(0)]],
+    texture2d<float, access::write> outTexture [[texture(1)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    const uint width = inTexture.get_width();
+    const uint height = inTexture.get_height();
+
+    // Bounds check
+    if (gid.x >= width || gid.y >= height) {
+        return;
+    }
+
+    // 5×5 Gaussian kernel (σ ≈ 1.0)
+    // Generated using: exp(-(x²+y²)/(2*σ²)) / (2*π*σ²)
+    // Normalized so sum = 1
+    const float gauss5[25] = {
+        0.00296902, 0.01330621, 0.02193823, 0.01330621, 0.00296902,
+        0.01330621, 0.05963429, 0.09832033, 0.05963429, 0.01330621,
+        0.02193823, 0.09832033, 0.16210282, 0.09832033, 0.02193823,
+        0.01330621, 0.05963429, 0.09832033, 0.05963429, 0.01330621,
+        0.00296902, 0.01330621, 0.02193823, 0.01330621, 0.00296902
+    };
+
+    float sum = 0;
+
+    // Apply 5×5 convolution
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            int2 samplePos = int2(gid) + int2(dx, dy);
+
+            // Clamp to texture bounds
+            samplePos.x = clamp(samplePos.x, 0, int(width) - 1);
+            samplePos.y = clamp(samplePos.y, 0, int(height) - 1);
+
+            float value = inTexture.read(uint2(samplePos)).r;
+            int kernelIndex = (dy + 2) * 5 + (dx + 2);
+            sum += value * gauss5[kernelIndex];
+        }
+    }
+
+    outTexture.write(float4(sum, 0, 0, 0), gid);
 }

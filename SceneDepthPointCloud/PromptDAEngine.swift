@@ -9,6 +9,7 @@ import CoreImage
 import CoreML
 import Accelerate
 import AVFoundation
+import Metal
 
 /// Minimal headless runner for PromptDA + LoG probability
 final class PromptDAEngine {
@@ -26,13 +27,21 @@ final class PromptDAEngine {
     private var rgbPB: CVPixelBuffer
     private var tmp1F: CVPixelBuffer
 
+    // Metal compute pipeline for LoG smoothing
+    private let metalDevice: MTLDevice
+    private let metalCommandQueue: MTLCommandQueue
+    private let smoothingPipeline: MTLComputePipelineState
+
     // Private init - use static create() method instead
-    private init(model: MLModel, rgbSize: CGSize, promptHW: (Int, Int)?, rgbPB: CVPixelBuffer, tmp1F: CVPixelBuffer) {
+    private init(model: MLModel, rgbSize: CGSize, promptHW: (Int, Int)?, rgbPB: CVPixelBuffer, tmp1F: CVPixelBuffer, metalDevice: MTLDevice, metalCommandQueue: MTLCommandQueue, smoothingPipeline: MTLComputePipelineState) {
         self.model = model
         self.rgbSize = rgbSize
         self.promptHW = promptHW
         self.rgbPB = rgbPB
         self.tmp1F = tmp1F
+        self.metalDevice = metalDevice
+        self.metalCommandQueue = metalCommandQueue
+        self.smoothingPipeline = smoothingPipeline
     }
     
     // Helper to read expected prompt H/W from model description
@@ -170,12 +179,44 @@ final class PromptDAEngine {
             throw NSError(domain: "PromptDAEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create temp buffer"])
         }
         print("   • Temp buffer created: \(Int(rgbSize.width))×\(Int(rgbSize.height)) Float32")
-        
+
+        // Initialize Metal compute pipeline for LoG smoothing
+        print("   • Setting up Metal compute pipeline...")
+        guard let metalDevice = MTLCreateSystemDefaultDevice() else {
+            print("❌ Failed to create Metal device")
+            throw NSError(domain: "PromptDAEngine", code: 4, userInfo: [NSLocalizedDescriptionKey: "Metal is not available"])
+        }
+        print("   • Metal device: \(metalDevice.name)")
+
+        guard let metalCommandQueue = metalDevice.makeCommandQueue() else {
+            print("❌ Failed to create Metal command queue")
+            throw NSError(domain: "PromptDAEngine", code: 5, userInfo: [NSLocalizedDescriptionKey: "Failed to create Metal command queue"])
+        }
+
+        guard let library = metalDevice.makeDefaultLibrary() else {
+            print("❌ Failed to load Metal shader library")
+            throw NSError(domain: "PromptDAEngine", code: 6, userInfo: [NSLocalizedDescriptionKey: "Failed to load Metal shader library"])
+        }
+
+        guard let smoothingFunction = library.makeFunction(name: "smoothLaplacianResponse") else {
+            print("❌ Failed to find smoothLaplacianResponse function in Metal library")
+            throw NSError(domain: "PromptDAEngine", code: 7, userInfo: [NSLocalizedDescriptionKey: "Failed to find smoothLaplacianResponse function"])
+        }
+
+        let smoothingPipeline: MTLComputePipelineState
+        do {
+            smoothingPipeline = try metalDevice.makeComputePipelineState(function: smoothingFunction)
+            print("   • Metal compute pipeline created successfully")
+        } catch {
+            print("❌ Failed to create Metal compute pipeline: \(error.localizedDescription)")
+            throw error
+        }
+
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("✅ PromptDAEngine initialization complete!")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-        
-        return PromptDAEngine(model: model, rgbSize: rgbSize, promptHW: finalPromptHW, rgbPB: pb!, tmp1F: tmp1F)
+
+        return PromptDAEngine(model: model, rgbSize: rgbSize, promptHW: finalPromptHW, rgbPB: pb!, tmp1F: tmp1F, metalDevice: metalDevice, metalCommandQueue: metalCommandQueue, smoothingPipeline: smoothingPipeline)
     }
 
     /// Runs PromptDA. If `lidarPB` is provided and the model expects it, we pass it as prompt.
@@ -350,68 +391,195 @@ final class PromptDAEngine {
         return pixelBuffer
     }
 
-    /// LoG = Laplacian(Gaussian(I)) → abs → normalize to sum=1 (probability map)
+    /// LoG = Pre-blur → Laplacian → abs → border suppression → post-smooth → clamp extremes → normalize
+    /// Hybrid approach: Combines pre-blur for noise reduction with post-smoothing for distribution
     private func makeLoGProbability(from rgb: CIImage, size: CGSize) throws -> CVPixelBuffer {
         print("      → makeLoGProbability: target size \(Int(size.width))×\(Int(size.height))")
-        
+
         let gray = rgb.toLuma().lanczosTo(size)
-        // Gaussian blur (σ ~ 1.0 px). Then 3×3 Laplacian conv approximant.
+
+        // Step 1: Pre-blur with Gaussian (σ=1.0) to reduce noise before Laplacian
+        // This prevents the Laplacian from being overly sensitive to high-frequency noise
         let blurred = gray.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.0])
-        let lap = blurred.applyingFilter("CIConvolution3X3", parameters: [
+        print("      → Applied pre-Gaussian blur (σ=1.0)")
+
+        // Step 2: Apply Laplacian to smoothed image (true Laplacian of Gaussian)
+        let lap = blurred.clampedToExtent().applyingFilter("CIConvolution3X3", parameters: [
             "inputWeights": CIVector(values: [
                 0,  1, 0,
                 1, -4, 1,
                 0,  1, 0
             ], count: 9),
             "inputBias": 0
-        ])
-        
-        // Create Metal-compatible pixel buffer with IOSurface backing
+        ]).cropped(to: blurred.extent)
+
+        // Step 3: Render Laplacian result to pixel buffer
+        let W = Int(size.width)
+        let H = Int(size.height)
+
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true
         ]
-        
-        var pb: CVPixelBuffer?
-        let status = CVPixelBufferCreate(kCFAllocatorDefault, Int(size.width), Int(size.height),
-                                        kCVPixelFormatType_OneComponent32Float, 
-                                        attrs as CFDictionary, &pb)
-        guard status == kCVReturnSuccess, let pixelBuffer = pb else {
-            print("      ❌ Failed to create LoG buffer: status=\(status)")
-            throw NSError(domain: "PromptDAEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create LoG buffer"])
-        }
-        ctx.render(lap, to: pixelBuffer)
 
-        // abs + normalize to sum=1
-        CVPixelBufferLockBaseAddress(pixelBuffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
-        
-        let stride = CVPixelBufferGetBytesPerRow(pixelBuffer) / MemoryLayout<Float>.stride
-        let buf = CVPixelBufferGetBaseAddress(pixelBuffer)!.assumingMemoryBound(to: Float.self)
+        // Buffer for Laplacian result (before smoothing)
+        var lapPB: CVPixelBuffer?
+        var status = CVPixelBufferCreate(kCFAllocatorDefault, W, H,
+                                        kCVPixelFormatType_OneComponent32Float,
+                                        attrs as CFDictionary, &lapPB)
+        guard status == kCVReturnSuccess, let laplacianBuffer = lapPB else {
+            print("      ❌ Failed to create Laplacian buffer: status=\(status)")
+            throw NSError(domain: "PromptDAEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create Laplacian buffer"])
+        }
+        ctx.render(lap, to: laplacianBuffer)
+
+        // Step 4: Take absolute value, clamp extreme values, and zero out border
+        CVPixelBufferLockBaseAddress(laplacianBuffer, [])
+        let stride = CVPixelBufferGetBytesPerRow(laplacianBuffer) / MemoryLayout<Float>.stride
+        let lapBuf = CVPixelBufferGetBaseAddress(laplacianBuffer)!.assumingMemoryBound(to: Float.self)
+
+        // First pass: take absolute value and find max for clamping
+        var maxResponse: Float = 0
+        for y in 0..<H {
+            for x in 0..<W {
+                let i = y * stride + x
+                lapBuf[i] = fabsf(lapBuf[i])
+                maxResponse = max(maxResponse, lapBuf[i])
+            }
+        }
+
+        // Second pass: Zero out border and clamp extreme values
+        let borderSize = 10  // Moderate border suppression
+        let clampThreshold = maxResponse * 0.15  // Clamp top 15% to prevent hot spots
+
+        for y in 0..<H {
+            for x in 0..<W {
+                let i = y * stride + x
+
+                // Zero out 10-pixel border to avoid edge artifacts
+                if x < borderSize || x >= W-borderSize || y < borderSize || y >= H-borderSize {
+                    lapBuf[i] = 0
+                } else {
+                    // Clamp extreme values to prevent single pixels from dominating
+                    if lapBuf[i] > clampThreshold {
+                        lapBuf[i] = clampThreshold
+                    }
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(laplacianBuffer, [])
+
+        print("      → Applied Laplacian: max=\(String(format: "%.3f", maxResponse)), clamped to \(String(format: "%.3f", clampThreshold)), border=\(borderSize)px")
+
+        // Step 5: Apply second Gaussian smoothing using Metal compute shader
+        // This spreads the LoG response spatially for better sampling distribution
+        var smoothPB: CVPixelBuffer?
+        status = CVPixelBufferCreate(kCFAllocatorDefault, W, H,
+                                    kCVPixelFormatType_OneComponent32Float,
+                                    attrs as CFDictionary, &smoothPB)
+        guard status == kCVReturnSuccess, let smoothedBuffer = smoothPB else {
+            print("      ❌ Failed to create smoothed buffer: status=\(status)")
+            throw NSError(domain: "PromptDAEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create smoothed buffer"])
+        }
+
+        // Create Metal textures from pixel buffers
+        var lapTextureCache: CVMetalTextureCache?
+        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, metalDevice, nil, &lapTextureCache)
+        guard let textureCache = lapTextureCache else {
+            print("      ❌ Failed to create texture cache")
+            throw NSError(domain: "PromptDAEngine", code: 8, userInfo: [NSLocalizedDescriptionKey: "Failed to create texture cache"])
+        }
+
+        var lapTextureCacheRef: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, laplacianBuffer, nil,
+                                                  .r32Float, W, H, 0, &lapTextureCacheRef)
+        guard let lapTexture = lapTextureCacheRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
+            print("      ❌ Failed to create input texture")
+            throw NSError(domain: "PromptDAEngine", code: 9, userInfo: [NSLocalizedDescriptionKey: "Failed to create input texture"])
+        }
+
+        var smoothTextureCacheRef: CVMetalTexture?
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, smoothedBuffer, nil,
+                                                  .r32Float, W, H, 0, &smoothTextureCacheRef)
+        guard let smoothTexture = smoothTextureCacheRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
+            print("      ❌ Failed to create output texture")
+            throw NSError(domain: "PromptDAEngine", code: 10, userInfo: [NSLocalizedDescriptionKey: "Failed to create output texture"])
+        }
+
+        // Execute Metal compute shader
+        guard let commandBuffer = metalCommandQueue.makeCommandBuffer(),
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            print("      ❌ Failed to create Metal command buffer/encoder")
+            throw NSError(domain: "PromptDAEngine", code: 11, userInfo: [NSLocalizedDescriptionKey: "Failed to create Metal command buffer"])
+        }
+
+        computeEncoder.setComputePipelineState(smoothingPipeline)
+        computeEncoder.setTexture(lapTexture, index: 0)
+        computeEncoder.setTexture(smoothTexture, index: 1)
+
+        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadGroups = MTLSize(
+            width: (W + threadGroupSize.width - 1) / threadGroupSize.width,
+            height: (H + threadGroupSize.height - 1) / threadGroupSize.height,
+            depth: 1
+        )
+
+        computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
+        computeEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        print("      → Applied second Gaussian smoothing (Metal compute)")
+
+        // Step 6: Clamp to [0, 1] and normalize to sum=1 (proper probability distribution)
+        CVPixelBufferLockBaseAddress(smoothedBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(smoothedBuffer, []) }
+
+        let smoothStride = CVPixelBufferGetBytesPerRow(smoothedBuffer) / MemoryLayout<Float>.stride
+        let smoothBuf = CVPixelBufferGetBaseAddress(smoothedBuffer)!.assumingMemoryBound(to: Float.self)
+
         var total: Float = 0
         var minVal: Float = .infinity
         var maxVal: Float = -.infinity
-        
-        for y in 0..<Int(size.height) {
-            let row = y*stride
-            for x in 0..<Int(size.width) {
-                let i = row + x
-                buf[i] = fabsf(buf[i])
-                total += buf[i]
-                minVal = min(minVal, buf[i])
-                maxVal = max(maxVal, buf[i])
+
+        // Clamp to [0, 1] and accumulate sum
+        for y in 0..<H {
+            for x in 0..<W {
+                let i = y * smoothStride + x
+                smoothBuf[i] = min(max(smoothBuf[i], 0.0), 1.0)  // Clamp [0, 1]
+                total += smoothBuf[i]
+                if smoothBuf[i] > 0 {
+                    minVal = min(minVal, smoothBuf[i])
+                    maxVal = max(maxVal, smoothBuf[i])
+                }
             }
-        }	
-        
-        print("      → LoG stats before normalization: min=\(String(format: "%.6f", minVal)), max=\(String(format: "%.6f", maxVal)), sum=\(String(format: "%.3f", total))")
-        
+        }
+
+        print("      → Clamped to [0,1]: min=\(String(format: "%.6f", minVal)), max=\(String(format: "%.6f", maxVal)), sum=\(String(format: "%.3f", total))")
+
+        // Normalize to sum=1 (proper probability distribution)
         let eps: Float = 1e-6
-        let inv = 1.0 / max(total, eps)
-        vDSP_vsmul(buf, 1, [inv], buf, 1, vDSP_Length(Int(size.width*size.height)))
-        
-        print("      → LoG normalized (sum should be ~1.0)")
-        
-        return pixelBuffer
+        guard total > eps else {
+            print("      ⚠️ Warning: LoG sum is near zero, using uniform distribution")
+            let uniform = 1.0 / Float(W * H)
+            for y in 0..<H {
+                for x in 0..<W {
+                    smoothBuf[y * smoothStride + x] = uniform
+                }
+            }
+            return smoothedBuffer
+        }
+
+        let inv = 1.0 / total
+        for y in 0..<H {
+            for x in 0..<W {
+                smoothBuf[y * smoothStride + x] *= inv
+            }
+        }
+
+        print("      → Normalized to probability distribution (sum=1.0)")
+
+        return smoothedBuffer
     }
 }
 
