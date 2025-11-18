@@ -182,6 +182,7 @@ public class SplatRenderer {
 
     public var sorting = false
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
+    private var lastSortedCount: Int = 0  // Track how many splats were sorted last time
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -221,6 +222,7 @@ public class SplatRenderer {
     public func reset() {
         splatBuffer.count = 0
         try? splatBuffer.setCapacity(0)
+        lastSortedCount = 0
     }
 
     // File loading disabled - use direct buffer loading instead
@@ -577,18 +579,16 @@ public class SplatRenderer {
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
     public func resort() {
-        guard !sorting else { 
-            print("⚠️ [SORT] Already sorting, skipping resort request")
-            return 
-        }
-        
+        guard !sorting else { return }
+
         let splatCount = splatBuffer.count
-        guard splatCount > 0 else {
-            print("⚠️ [SORT] No splats to sort (count = 0)")
-            return
-        }
-        
-        print("🔄 [SORT] Starting resort for \(splatCount) splats")
+        guard splatCount > 0 else { return }
+
+        // Determine if we can do incremental sort
+        // Only do incremental if we have a previous sort and splat count increased
+        let canDoIncremental = lastSortedCount > 0 && splatCount > lastSortedCount
+        let newSplatCount = canDoIncremental ? (splatCount - lastSortedCount) : 0
+
         sorting = true
         onSortStart?()
         let sortStartTime = Date()
@@ -599,103 +599,204 @@ public class SplatRenderer {
         Task(priority: .high) {
             defer {
                 let elapsed = -sortStartTime.timeIntervalSinceNow
-                print("✅ [SORT] Completed in \(String(format: "%.1f", elapsed * 1000))ms")
+                let sortType = canDoIncremental ? "INCR" : "FULL"
+                print("🔄 [SORT] \(sortType): \(splatCount) splats in \(String(format: "%.0f", elapsed * 1000))ms")
                 sorting = false
                 onSortComplete?(elapsed)
+                lastSortedCount = splatCount  // Update last sorted count
             }
 
-            print("🔵 [SORT] Validating buffer state...")
-            
             // Validate buffer state before accessing
-            guard splatBuffer.capacity >= splatCount else {
-                print("❌ [SORT] Buffer capacity (\(splatBuffer.capacity)) < count (\(splatCount))")
-                return
-            }
-            
+            guard splatBuffer.capacity >= splatCount else { return }
+
             // Test first few positions to detect corruption early
             let testCount = min(splatCount, 5)
             for i in 0..<testCount {
                 let position = splatBuffer.values[i].position
                 if position.x.isNaN || position.y.isNaN || position.z.isNaN {
-                    print("❌ [SORT] NaN detected in position[\(i)]: (\(position.x), \(position.y), \(position.z))")
+                    print("❌ [SORT] NaN detected in buffer")
                     return
                 }
-                if abs(position.x) > 1000 || abs(position.y) > 1000 || abs(position.z) > 1000 {
-                    print("⚠️ [SORT] Extreme position[\(i)]: (\(position.x), \(position.y), \(position.z))")
+            }
+
+            if canDoIncremental {
+                // INCREMENTAL SORT PATH: Only sort new splats and merge with existing sorted prefix
+                await self.performIncrementalSort(
+                    splatCount: splatCount,
+                    lastSortedCount: lastSortedCount,
+                    newSplatCount: newSplatCount,
+                    cameraWorldForward: cameraWorldForward,
+                    cameraWorldPosition: cameraWorldPosition
+                )
+            } else {
+                // FULL SORT PATH: Sort everything
+                await self.performFullSort(
+                    splatCount: splatCount,
+                    cameraWorldForward: cameraWorldForward,
+                    cameraWorldPosition: cameraWorldPosition
+                )
+            }
+        }
+    }
+
+    private func performFullSort(
+        splatCount: Int,
+        cameraWorldForward: SIMD3<Float>,
+        cameraWorldPosition: SIMD3<Float>
+    ) async {
+        if orderAndDepthTempSort.count != splatCount {
+            orderAndDepthTempSort = Array(repeating: SplatIndexAndDepth(index: .max, depth: 0), count: splatCount)
+        }
+
+        // Parallelize depth calculation for better performance with large splat counts
+        let chunkSize = max(1, splatCount / ProcessInfo.processInfo.activeProcessorCount)
+
+        if Constants.sortByDistance {
+            DispatchQueue.concurrentPerform(iterations: splatCount / chunkSize + (splatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
+                let start = chunkIndex * chunkSize
+                let end = min(start + chunkSize, splatCount)
+                for i in start..<end {
+                    orderAndDepthTempSort[i].index = UInt32(i)
+                    let splatPosition = splatBuffer.values[i].position.simd
+                    orderAndDepthTempSort[i].depth = (splatPosition - cameraWorldPosition).lengthSquared
                 }
             }
-            print("✅ [SORT] Buffer validation passed")
+        } else {
+            DispatchQueue.concurrentPerform(iterations: splatCount / chunkSize + (splatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
+                let start = chunkIndex * chunkSize
+                let end = min(start + chunkSize, splatCount)
+                for i in start..<end {
+                    orderAndDepthTempSort[i].index = UInt32(i)
+                    let splatPosition = splatBuffer.values[i].position.simd
+                    orderAndDepthTempSort[i].depth = dot(splatPosition, cameraWorldForward)
+                }
+            }
+        }
 
-            if orderAndDepthTempSort.count != splatCount {
-                print("🔵 [SORT] Resizing temp array from \(orderAndDepthTempSort.count) to \(splatCount)")
-                orderAndDepthTempSort = Array(repeating: SplatIndexAndDepth(index: .max, depth: 0), count: splatCount)
+        orderAndDepthTempSort.sort { $0.depth > $1.depth }
+
+        do {
+            try splatBufferPrime.setCapacity(splatCount)
+            splatBufferPrime.count = splatCount
+
+            // Parallel copy of sorted elements
+            let copyChunkSize = max(1, splatCount / ProcessInfo.processInfo.activeProcessorCount)
+            DispatchQueue.concurrentPerform(iterations: splatCount / copyChunkSize + (splatCount % copyChunkSize > 0 ? 1 : 0)) { chunkIndex in
+                let start = chunkIndex * copyChunkSize
+                let end = min(start + copyChunkSize, splatCount)
+                for newIndex in start..<end {
+                    let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
+                    if oldIndex < splatCount {
+                        splatBufferPrime.values[newIndex] = splatBuffer.values[oldIndex]
+                    }
+                }
             }
 
-            let depthCalcStart = CFAbsoluteTimeGetCurrent()
-            print("🔵 [SORT] Calculating depths (sortByDistance: \(Constants.sortByDistance), parallel: true)...")
-            
-            // Parallelize depth calculation for better performance with large splat counts
-            let chunkSize = max(1, splatCount / ProcessInfo.processInfo.activeProcessorCount)
-            
+            swap(&splatBuffer, &splatBufferPrime)
+        } catch {
+            print("❌ [SORT] Failed: \(error)")
+        }
+    }
+
+    private func performIncrementalSort(
+        splatCount: Int,
+        lastSortedCount: Int,
+        newSplatCount: Int,
+        cameraWorldForward: SIMD3<Float>,
+        cameraWorldPosition: SIMD3<Float>
+    ) async {
+        // Allocate temp array for new splats only
+        var newSplatsDepth = Array(repeating: SplatIndexAndDepth(index: .max, depth: 0), count: newSplatCount)
+
+        // Calculate depths only for NEW splats
+        let chunkSize = max(1, newSplatCount / ProcessInfo.processInfo.activeProcessorCount)
+
+        if Constants.sortByDistance {
+            DispatchQueue.concurrentPerform(iterations: newSplatCount / chunkSize + (newSplatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
+                let start = chunkIndex * chunkSize
+                let end = min(start + chunkSize, newSplatCount)
+                for i in start..<end {
+                    let splatIndex = lastSortedCount + i
+                    newSplatsDepth[i].index = UInt32(splatIndex)
+                    let splatPosition = splatBuffer.values[splatIndex].position.simd
+                    newSplatsDepth[i].depth = (splatPosition - cameraWorldPosition).lengthSquared
+                }
+            }
+        } else {
+            DispatchQueue.concurrentPerform(iterations: newSplatCount / chunkSize + (newSplatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
+                let start = chunkIndex * chunkSize
+                let end = min(start + chunkSize, newSplatCount)
+                for i in start..<end {
+                    let splatIndex = lastSortedCount + i
+                    newSplatsDepth[i].index = UInt32(splatIndex)
+                    let splatPosition = splatBuffer.values[splatIndex].position.simd
+                    newSplatsDepth[i].depth = dot(splatPosition, cameraWorldForward)
+                }
+            }
+        }
+
+        newSplatsDepth.sort { $0.depth > $1.depth }
+
+        do {
+            try splatBufferPrime.setCapacity(splatCount)
+            splatBufferPrime.count = splatCount
+
+            var prefixIdx = 0
+            var newIdx = 0
+            var outIdx = 0
+            var prefixDepths = Array(repeating: Float(0), count: lastSortedCount)
+
+            // Recalculate depths for existing splats for merge comparison
             if Constants.sortByDistance {
-                DispatchQueue.concurrentPerform(iterations: splatCount / chunkSize + (splatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
+                DispatchQueue.concurrentPerform(iterations: lastSortedCount / chunkSize + (lastSortedCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
                     let start = chunkIndex * chunkSize
-                    let end = min(start + chunkSize, splatCount)
+                    let end = min(start + chunkSize, lastSortedCount)
                     for i in start..<end {
-                        orderAndDepthTempSort[i].index = UInt32(i)
                         let splatPosition = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = (splatPosition - cameraWorldPosition).lengthSquared
+                        prefixDepths[i] = (splatPosition - cameraWorldPosition).lengthSquared
                     }
                 }
             } else {
-                DispatchQueue.concurrentPerform(iterations: splatCount / chunkSize + (splatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
+                DispatchQueue.concurrentPerform(iterations: lastSortedCount / chunkSize + (lastSortedCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
                     let start = chunkIndex * chunkSize
-                    let end = min(start + chunkSize, splatCount)
+                    let end = min(start + chunkSize, lastSortedCount)
                     for i in start..<end {
-                        orderAndDepthTempSort[i].index = UInt32(i)
                         let splatPosition = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = dot(splatPosition, cameraWorldForward)
+                        prefixDepths[i] = dot(splatPosition, cameraWorldForward)
                     }
                 }
             }
-            
-            let depthCalcTime = CFAbsoluteTimeGetCurrent() - depthCalcStart
-            print("✅ [SORT] Depth calculation: \(String(format: "%.1f", depthCalcTime * 1000))ms")
 
-            let sortStart = CFAbsoluteTimeGetCurrent()
-            print("🔵 [SORT] Sorting \(splatCount) elements...")
-            orderAndDepthTempSort.sort { $0.depth > $1.depth }
-            let sortTime = CFAbsoluteTimeGetCurrent() - sortStart
-            print("✅ [SORT] Array sort: \(String(format: "%.1f", sortTime * 1000))ms")
-
-            let copyStart = CFAbsoluteTimeGetCurrent()
-            print("🔵 [SORT] Copying sorted results (parallel)...")
-            do {
-                try splatBufferPrime.setCapacity(splatCount)
-                splatBufferPrime.count = splatCount  // Set count upfront for parallel writes
-                
-                // Parallel copy of sorted elements
-                let copyChunkSize = max(1, splatCount / ProcessInfo.processInfo.activeProcessorCount)
-                DispatchQueue.concurrentPerform(iterations: splatCount / copyChunkSize + (splatCount % copyChunkSize > 0 ? 1 : 0)) { chunkIndex in
-                    let start = chunkIndex * copyChunkSize
-                    let end = min(start + copyChunkSize, splatCount)
-                    for newIndex in start..<end {
-                        let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
-                        if oldIndex < splatCount {
-                            splatBufferPrime.values[newIndex] = splatBuffer.values[oldIndex]
-                        }
-                    }
+            // Merge the two sorted sequences
+            while prefixIdx < lastSortedCount && newIdx < newSplatCount {
+                if prefixDepths[prefixIdx] > newSplatsDepth[newIdx].depth {
+                    splatBufferPrime.values[outIdx] = splatBuffer.values[prefixIdx]
+                    prefixIdx += 1
+                } else {
+                    let oldIndex = Int(newSplatsDepth[newIdx].index)
+                    splatBufferPrime.values[outIdx] = splatBuffer.values[oldIndex]
+                    newIdx += 1
                 }
-                
-                let copyTime = CFAbsoluteTimeGetCurrent() - copyStart
-                print("✅ [SORT] Buffer copy: \(String(format: "%.1f", copyTime * 1000))ms")
-
-                print("🔵 [SORT] Swapping buffers...")
-                swap(&splatBuffer, &splatBufferPrime)
-                print("✅ [SORT] Buffers swapped successfully")
-            } catch {
-                print("❌ [SORT] Failed to copy sorted results: \(error)")
+                outIdx += 1
             }
+
+            // Copy remaining
+            while prefixIdx < lastSortedCount {
+                splatBufferPrime.values[outIdx] = splatBuffer.values[prefixIdx]
+                prefixIdx += 1
+                outIdx += 1
+            }
+
+            while newIdx < newSplatCount {
+                let oldIndex = Int(newSplatsDepth[newIdx].index)
+                splatBufferPrime.values[outIdx] = splatBuffer.values[oldIndex]
+                newIdx += 1
+                outIdx += 1
+            }
+
+            swap(&splatBuffer, &splatBufferPrime)
+        } catch {
+            print("❌ [SORT] Failed: \(error)")
         }
     }
 }

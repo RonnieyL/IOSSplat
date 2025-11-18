@@ -617,7 +617,7 @@ final class PromptDAEngine {
             "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
         ])
 
-        return clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: size)
+        return try clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: size)
     }
     
     
@@ -648,6 +648,36 @@ private extension CIImage {
         f.setValue(sx/sy, forKey:"inputAspectRatio")
         let img = (f.outputImage ?? self).cropped(to: .init(origin:.zero, size:size))
         return img
+    }
+
+    func toPixelBuffer(context: CIContext, pixelFormat: OSType, size: CGSize) throws -> CVPixelBuffer {
+        let width = Int(size.width)
+        let height = Int(size.height)
+
+        var pixelBuffer: CVPixelBuffer?
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
+            kCVPixelBufferMetalCompatibilityKey: true
+        ]
+
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            width,
+            height,
+            pixelFormat,
+            attributes as CFDictionary,
+            &pixelBuffer
+        )
+
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            throw NSError(domain: "CIImage.toPixelBuffer", code: Int(status), userInfo: [
+                NSLocalizedDescriptionKey: "Failed to create CVPixelBuffer with status: \(status)"
+            ])
+        }
+
+        context.render(self, to: buffer)
+        return buffer
     }
 }
 

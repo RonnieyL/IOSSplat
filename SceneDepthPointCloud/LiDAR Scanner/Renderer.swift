@@ -67,6 +67,10 @@ final class Renderer {
     private var frameCounter = 0
     private var extractedFrameCounter = 0
     private var currentScanFolderName = ""
+
+    // Debug logging control
+    private var debugFrameCounter = 0
+    private let debugLogInterval = 60  // Log every N frames
     // We only use portrait orientation in this app
     private let orientation = UIInterfaceOrientation.portrait
     // Camera's threshold values for detecting when the camera moves so that we can accumulate the points
@@ -531,26 +535,13 @@ final class Renderer {
     }
 
         func draw() {
-        print("🎬 [DRAW] Starting draw() - renderMode: \(renderMode)")
+        debugFrameCounter += 1
+        let shouldLog = debugFrameCounter % debugLogInterval == 0
 
-        guard let currentFrame = session.currentFrame else {
-            print("❌ [DRAW] No current frame available")
-            return
-        }
-        guard let renderDescriptor = renderDestination.currentRenderPassDescriptor else {
-            print("❌ [DRAW] No render pass descriptor")
-            return
-        }
-        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-            print("❌ [DRAW] Failed to create command buffer")
-            return
-        }
-        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderDescriptor) else {
-            print("❌ [DRAW] Failed to create render encoder")
-            return
-        }
-
-        print("✅ [DRAW] Created command buffer and render encoder")
+        guard let currentFrame = session.currentFrame else { return }
+        guard let renderDescriptor = renderDestination.currentRenderPassDescriptor else { return }
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderDescriptor) else { return }
 
         _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
         commandBuffer.addCompletedHandler { [weak self] commandBuffer in
@@ -562,7 +553,6 @@ final class Renderer {
         // Always update frame data and camera textures for smooth camera feed
         update(frame: currentFrame)
         updateCapturedImageTextures(frame: currentFrame)
-        print("✅ [DRAW] Updated frame data and textures")
 
         // handle buffer rotating
         currentBufferIndex = (currentBufferIndex + 1) % maxInFlightBuffers
@@ -597,75 +587,55 @@ final class Renderer {
 
         // render particles (if enabled by render mode)
         if self.showParticles && (renderMode == .particles || renderMode == .both) {
-            print("🔵 [DRAW] Rendering \(currentPointCount) particles")
             renderEncoder.setDepthStencilState(depthStencilState)
             renderEncoder.setRenderPipelineState(particlePipelineState)
             renderEncoder.setVertexBuffer(pointCloudUniformsBuffers[currentBufferIndex])
             renderEncoder.setVertexBuffer(particlesBuffer)
             renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: currentPointCount)
-            print("✅ [DRAW] Particles rendered successfully")
-        } else if renderMode == .particles {
-            print("⚠️ [DRAW] Particles rendering disabled (showParticles=false)")
         }
 
         // End particle rendering encoder before splat rendering (SplatRenderer creates its own encoder)
-        print("🔵 [DRAW] Ending render encoder")
         renderEncoder.endEncoding()
-        print("✅ [DRAW] Render encoder ended")
 
-        // MARK: - Splat Rendering (Phase 4)
         // Auto-sync Gaussians to SplatRenderer periodically
-        print("🔵 [DRAW] Checking if sync needed (mode: \(renderMode))")
         autoSyncGaussiansIfNeeded(currentTime: currentFrame.timestamp)
 
         // Render Gaussian splats (if enabled by render mode)
         if (renderMode == .splats || renderMode == .both) {
-            print("🔵 [DRAW] Splat rendering enabled, checking SplatRenderer...")
-
             guard let splatRenderer = splatRenderer else {
-                print("⚠️ [DRAW] SplatRenderer not initialized, skipping splat rendering")
                 commandBuffer.present(renderDestination.currentDrawable!)
                 commandBuffer.commit()
-                print("🏁 [DRAW] Finished draw() - no splats")
                 return
             }
 
-            print("✅ [DRAW] SplatRenderer available (count: \(splatRenderer.splatCount))")
-
-            // Create viewport descriptor from current frame
-            print("🔵 [DRAW] Creating viewport descriptor...")
             let viewport = makeSplatViewport(frame: currentFrame)
-            print("✅ [DRAW] Viewport created (size: \(viewport.screenSize))")
 
             do {
-                print("🔵 [DRAW] Starting SplatRenderer.render()...")
-
-                // SplatRenderer handles its own render encoder lifecycle
                 try splatRenderer.render(
                     viewports: [viewport],
                     colorTexture: renderDestination.currentDrawable!.texture,
-                    colorStoreAction: .store,  // Keep existing content (particles already rendered)
+                    colorStoreAction: .store,
                     depthTexture: renderDescriptor.depthAttachment.texture,
                     rasterizationRateMap: nil,
                     renderTargetArrayLength: 0,
                     to: commandBuffer
                 )
-                print("✅ [DRAW] Rendered \(splatRenderer.splatCount) Gaussian splats")
             } catch {
-                print("❌ [DRAW] Failed to render splats: \(error)")
-                if let nsError = error as NSError? {
-                    print("   Domain: \(nsError.domain), Code: \(nsError.code)")
-                    print("   Reason: \(nsError.localizedFailureReason ?? "none")")
+                if shouldLog {
+                    print("❌ [RENDER] Splat render failed: \(error)")
                 }
             }
-        } else {
-            print("ℹ️ [DRAW] Splat rendering not enabled for mode: \(renderMode)")
         }
 
-        print("🔵 [DRAW] Presenting and committing command buffer...")
         commandBuffer.present(renderDestination.currentDrawable!)
         commandBuffer.commit()
-        print("🏁 [DRAW] Finished draw() successfully")
+
+        // Log summary every N frames
+        if shouldLog {
+            let particleCount = renderMode == .splats ? 0 : currentPointCount
+            let splatCount = (renderMode == .splats || renderMode == .both) ? (splatRenderer?.splatCount ?? 0) : 0
+            print("📊 [RENDER] Particles: \(particleCount), Splats: \(splatCount) (frame \(debugFrameCounter))")
+        }
     }
 
     private func shouldProcessLiDARThisFrame(_ frame: ARFrame) -> Bool {
@@ -806,67 +776,31 @@ extension Renderer {
     /// Only syncs the actual accumulated count, not the full buffer capacity
     /// Much faster than CPU memcpy - no GPU→CPU→GPU roundtrip!
     func syncGaussiansToSplatRenderer() {
-        print("🔄 [SYNC] Starting sync - current count: \(currentGaussianCount)")
-
-        guard let splatRenderer = splatRenderer else {
-            print("⚠️ [SYNC] Cannot sync: SplatRenderer not initialized")
-            return
-        }
-
-        guard currentGaussianCount > 0 else {
-            print("⚠️ [SYNC] No Gaussians to sync (count = 0)")
-            return
-        }
-        
-        // Don't sync if already sorting - prevents race conditions
-        guard !splatRenderer.sorting else {
-            print("⚠️ [SYNC] Skipping sync - SplatRenderer is currently sorting")
-            return
-        }
+        guard let splatRenderer = splatRenderer else { return }
+        guard currentGaussianCount > 0 else { return }
+        guard !splatRenderer.sorting else { return }
 
         do {
-            let startTime = CFAbsoluteTimeGetCurrent()
-            print("🔵 [SYNC] Ensuring capacity for \(currentGaussianCount) gaussians...")
-
-            // Ensure SplatRenderer has enough capacity
             try splatRenderer.splatBuffer.ensureCapacity(currentGaussianCount)
-            print("✅ [SYNC] Capacity ensured")
 
-            // Validate source buffer before copying
-            print("🔵 [SYNC] Validating source buffer...")
-            guard gaussiansBuffer.count >= currentGaussianCount else {
-                print("❌ [SYNC] Source buffer count (\(gaussiansBuffer.count)) < requested count (\(currentGaussianCount))")
-                return
-            }
-            
-            // Test a few source positions to detect corruption
+            // Validate source buffer
+            guard gaussiansBuffer.count >= currentGaussianCount else { return }
+
             let testCount = min(currentGaussianCount, 3)
             for i in 0..<testCount {
                 let gaussian = gaussiansBuffer.values[i]
                 let pos = gaussian.position
                 if pos.x.isNaN || pos.y.isNaN || pos.z.isNaN {
-                    print("❌ [SYNC] NaN in source gaussian[\(i)]: (\(pos.x), \(pos.y), \(pos.z))")
+                    print("❌ [SYNC] NaN detected in source buffer")
                     return
                 }
             }
-            print("✅ [SYNC] Source buffer validation passed")
 
-            // Create a command buffer for GPU-side copy
-            print("🔵 [SYNC] Creating blit command buffer...")
-            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-                print("❌ [SYNC] Failed to create command buffer")
-                return
-            }
-            guard let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
-                print("❌ [SYNC] Failed to create blit encoder")
-                return
-            }
-            print("✅ [SYNC] Created blit encoder")
+            // GPU-to-GPU copy
+            guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                  let blitEncoder = commandBuffer.makeBlitCommandEncoder() else { return }
 
-            // GPU-to-GPU copy (direct buffer access)
             let byteCount = currentGaussianCount * MemoryLayout<SplatRenderer.Splat>.stride
-            print("🔵 [SYNC] Copying \(byteCount) bytes (\(currentGaussianCount) gaussians @ \(MemoryLayout<SplatRenderer.Splat>.stride) bytes each)")
-
             blitEncoder.copy(
                 from: gaussiansBuffer.buffer,
                 sourceOffset: 0,
@@ -874,49 +808,20 @@ extension Renderer {
                 destinationOffset: 0,
                 size: byteCount
             )
-            print("✅ [SYNC] Blit copy enqueued")
 
             blitEncoder.endEncoding()
-            print("✅ [SYNC] Blit encoder ended")
-
-            print("🔵 [SYNC] Committing blit command buffer...")
             commandBuffer.commit()
-            print("🔵 [SYNC] Waiting for blit to complete...")
             commandBuffer.waitUntilCompleted()
-            print("✅ [SYNC] Blit completed")
 
-            // Update splat count (SplatMetalBuffer has mutable count)
-            print("🔵 [SYNC] Updating splat count to \(currentGaussianCount)")
             splatRenderer.splatBuffer.count = currentGaussianCount
-            print("✅ [SYNC] Splat count updated")
-            
-            // Validate destination buffer after copy
-            print("🔵 [SYNC] Validating destination buffer...")
-            for i in 0..<testCount {
-                let splat = splatRenderer.splatBuffer.values[i]
-                let pos = splat.position
-                if pos.x.isNaN || pos.y.isNaN || pos.z.isNaN {
-                    print("❌ [SYNC] NaN in destination splat[\(i)]: (\(pos.x), \(pos.y), \(pos.z))")
-                    return
-                }
-            }
-            print("✅ [SYNC] Destination buffer validation passed")
 
-            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            print("📋 [SYNC] GPU-synced \(currentGaussianCount) Gaussians (\(String(format: "%.1f", elapsed * 1000))ms)")
-
-            // Add a small delay to ensure GPU operations are fully complete before sorting
+            // Trigger resort
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-                print("🔵 [SYNC] Triggering resort (with 10ms delay)...")
                 splatRenderer.resort()
-                print("✅ [SYNC] Resort triggered (async)")
             }
 
         } catch {
-            print("❌ [SYNC] Failed to sync Gaussians to SplatRenderer: \(error)")
-            if let nsError = error as NSError? {
-                print("   Domain: \(nsError.domain), Code: \(nsError.code)")
-            }
+            print("❌ [SYNC] Failed: \(error)")
         }
     }
 
