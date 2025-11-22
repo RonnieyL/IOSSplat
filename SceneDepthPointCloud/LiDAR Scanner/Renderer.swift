@@ -32,6 +32,10 @@ final class Renderer {
 
     // MARK: - Gaussian Splat Rendering
     var splatRenderer: SplatRenderer?
+    var openSplatRenderer: OpenSplatRenderer?  // NEW: OpenSplat tile-based renderer
+    var gaussianConverter: GaussianConverter?  // NEW: Converts MetalSplat → OpenSplat format
+    var useOpenSplat: Bool = false  // NEW: Toggle between MetalSplat and OpenSplat
+
     var renderMode: RenderMode = .splats {
         didSet {
             print("🎨 Render mode changed: \(renderMode)")
@@ -71,6 +75,11 @@ final class Renderer {
     // Debug logging control
     private var debugFrameCounter = 0
     private let debugLogInterval = 60  // Log every N frames
+
+    // Frame timing for OpenSplat performance monitoring
+    private var renderFrameCounter = 0
+    private var lastFrameTimestamp: TimeInterval = 0
+    private let frameTimingInterval = 10  // Report timing every N frames
     // We only use portrait orientation in this app
     private let orientation = UIInterfaceOrientation.portrait
     // Camera's threshold values for detecting when the camera moves so that we can accumulate the points
@@ -268,6 +277,33 @@ final class Renderer {
             }
             print("   → Splat rendering will not be available")
             print("   → Ensure Metal shaders are in Resources folder")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        }
+
+        // Initialize OpenSplatRenderer for tile-based rendering
+        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("🔧 Renderer: Initializing OpenSplatRenderer...")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        do {
+            let startTime = CFAbsoluteTimeGetCurrent()
+            openSplatRenderer = try OpenSplatRenderer(device: device)
+            gaussianConverter = GaussianConverter(device: device)
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            print("✅ Renderer: OpenSplatRenderer ready! (loaded in \(String(format: "%.2f", elapsed))s)")
+            print("   Tile-based GPU rendering with OpenSplat kernels")
+            print("   Use 'useOpenSplat = true' to enable")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        } catch {
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            print("⚠️ Renderer: OpenSplatRenderer NOT available")
+            print("   Error: \(error.localizedDescription)")
+            if let nsError = error as NSError? {
+                print("   Domain: \(nsError.domain)")
+                print("   Code: \(nsError.code)")
+            }
+            print("   → Will fall back to standard SplatRenderer")
             print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
         }
 
@@ -602,28 +638,39 @@ final class Renderer {
 
         // Render Gaussian splats (if enabled by render mode)
         if (renderMode == .splats || renderMode == .both) {
-            guard let splatRenderer = splatRenderer else {
+            if useOpenSplat, let openSplatRenderer = openSplatRenderer,
+               let gaussianConverter = gaussianConverter {
+                // Use OpenSplat tile-based renderer
+                renderWithOpenSplat(
+                    commandBuffer: commandBuffer,
+                    openSplatRenderer: openSplatRenderer,
+                    gaussianConverter: gaussianConverter,
+                    frame: currentFrame
+                )
+            } else if let splatRenderer = splatRenderer {
+                // Use standard MetalSplat renderer
+                let viewport = makeSplatViewport(frame: currentFrame)
+
+                do {
+                    try splatRenderer.render(
+                        viewports: [viewport],
+                        colorTexture: renderDestination.currentDrawable!.texture,
+                        colorStoreAction: .store,
+                        depthTexture: renderDescriptor.depthAttachment.texture,
+                        rasterizationRateMap: nil,
+                        renderTargetArrayLength: 0,
+                        to: commandBuffer
+                    )
+                } catch {
+                    if shouldLog {
+                        print("❌ [RENDER] Splat render failed: \(error)")
+                    }
+                }
+            } else {
+                // No renderer available
                 commandBuffer.present(renderDestination.currentDrawable!)
                 commandBuffer.commit()
                 return
-            }
-
-            let viewport = makeSplatViewport(frame: currentFrame)
-
-            do {
-                try splatRenderer.render(
-                    viewports: [viewport],
-                    colorTexture: renderDestination.currentDrawable!.texture,
-                    colorStoreAction: .store,
-                    depthTexture: renderDescriptor.depthAttachment.texture,
-                    rasterizationRateMap: nil,
-                    renderTargetArrayLength: 0,
-                    to: commandBuffer
-                )
-            } catch {
-                if shouldLog {
-                    print("❌ [RENDER] Splat render failed: \(error)")
-                }
             }
         }
 
@@ -833,6 +880,72 @@ extension Renderer {
 
         lastSplatSyncTime = currentTime
         syncGaussiansToSplatRenderer()
+    }
+
+    /// Render using OpenSplat tile-based renderer
+    private func renderWithOpenSplat(
+        commandBuffer: MTLCommandBuffer,
+        openSplatRenderer: OpenSplatRenderer,
+        gaussianConverter: GaussianConverter,
+        frame: ARFrame
+    ) {
+        // Get current splat buffer from MetalSplat
+        guard let splatRenderer = splatRenderer else { return }
+        let splatCount = splatRenderer.splatCount
+        guard splatCount > 0 else { return }
+
+        // Performance monitoring
+        renderFrameCounter += 1
+        print("🎯 Frame \(renderFrameCounter): Rendering \(splatCount) gaussians")
+
+        // Measure frame timing every N frames
+        let currentTime = CACurrentMediaTime()
+        if renderFrameCounter % frameTimingInterval == 0 {
+            if lastFrameTimestamp > 0 {
+                let deltaTime = currentTime - lastFrameTimestamp
+                let fps = Double(frameTimingInterval) / deltaTime
+                print("⏱️  Last \(frameTimingInterval) frames: \(String(format: "%.2f", deltaTime * 1000))ms total, \(String(format: "%.1f", fps)) FPS")
+            }
+            lastFrameTimestamp = currentTime
+        }
+
+        // Convert MetalSplat format to OpenSplat format
+        guard let gaussianData = gaussianConverter.convert(
+            splatBuffer: splatRenderer.splatBuffer.buffer,
+            count: splatCount
+        ) else {
+            print("⚠️ Failed to convert gaussian data")
+            return
+        }
+
+        // Extract camera parameters
+        let camera = frame.camera
+        let viewMatrix = camera.viewMatrix(for: orientation)
+        let projMatrix = camera.projectionMatrix(
+            for: orientation,
+            viewportSize: viewportSize,
+            zNear: 0.001,
+            zFar: 1000
+        )
+
+        // Get intrinsics
+        let intrinsics = camera.intrinsics
+        let fx = Float(intrinsics[0, 0])
+        let fy = Float(intrinsics[1, 1])
+        let cx = Float(intrinsics[2, 0])
+        let cy = Float(intrinsics[2, 1])
+
+        // Render using OpenSplat
+        openSplatRenderer.render(
+            gaussianData: gaussianData,
+            viewMatrix: viewMatrix,
+            projMatrix: projMatrix,
+            intrinsics: SIMD4<Float>(fx, fy, cx, cy),
+            imgWidth: Int(viewportSize.width),
+            imgHeight: Int(viewportSize.height),
+            outputTexture: renderDestination.currentDrawable!.texture,
+            background: SIMD3<Float>(0, 0, 0)
+        )
     }
 
     // MARK: - Viewport/Camera Setup (Phase 3)

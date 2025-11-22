@@ -26,6 +26,18 @@
 		0DDBAF062E4A8F3800074FFE /* SceneDepthPointCloud-Bridging-Header.h in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEF72E4A8EB400074FFE /* SceneDepthPointCloud-Bridging-Header.h */; };
 		0DDBAF072E4A8F4E00074FFE /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DDBAEF32E4A8EB400074FFE /* LaunchScreen.storyboard */; };
 		0DDBAF082E4A8F4E00074FFE /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DDBAEF52E4A8EB400074FFE /* Main.storyboard */; };
+		66302E232ECB26FB009EBF14 /* GSplatStruct.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66302E222ECB26FB009EBF14 /* GSplatStruct.swift */; };
+		66302E252ECB3041009EBF14 /* SplatRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66302E242ECB3041009EBF14 /* SplatRenderer.swift */; };
+		66302E3B2ECB308F009EBF14 /* SplatProcessing.metal in Sources */ = {isa = PBXBuildFile; fileRef = 66302E392ECB308F009EBF14 /* SplatProcessing.metal */; };
+		66302E3C2ECB308F009EBF14 /* MultiStageRenderPath.metal in Sources */ = {isa = PBXBuildFile; fileRef = 66302E352ECB308F009EBF14 /* MultiStageRenderPath.metal */; };
+		66302E3D2ECB308F009EBF14 /* SingleStageRenderPath.metal in Sources */ = {isa = PBXBuildFile; fileRef = 66302E372ECB308F009EBF14 /* SingleStageRenderPath.metal */; };
+		66302E432ECB3615009EBF14 /* SplatMetalBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66302E422ECB3615009EBF14 /* SplatMetalBuffer.swift */; };
+		667877EE2ED1B518006F0793 /* GPUUtilities.metal in Sources */ = {isa = PBXBuildFile; fileRef = 667877EB2ED1B518006F0793 /* GPUUtilities.metal */; };
+		667877EF2ED1B518006F0793 /* OpenSplatKernels.metal in Sources */ = {isa = PBXBuildFile; fileRef = 667877EC2ED1B518006F0793 /* OpenSplatKernels.metal */; };
+		667877F02ED1B518006F0793 /* GaussianConverter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 667877EA2ED1B518006F0793 /* GaussianConverter.swift */; };
+		667877F12ED1B518006F0793 /* RadixSort.metal in Sources */ = {isa = PBXBuildFile; fileRef = 667877ED2ED1B518006F0793 /* RadixSort.metal */; };
+		667877F42ED1B568006F0793 /* GPUUtilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 667877F22ED1B568006F0793 /* GPUUtilities.swift */; };
+		667877F52ED1B568006F0793 /* OpenSplatRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 667877F32ED1B568006F0793 /* OpenSplatRenderer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -85,6 +97,20 @@
 		0DDBAEF42E4A8EB400074FFE /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		0DDBAEF62E4A8EB400074FFE /* OptionSelectionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptionSelectionController.swift; sourceTree = "<group>"; };
 		0DDBAEF72E4A8EB400074FFE /* SceneDepthPointCloud-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SceneDepthPointCloud-Bridging-Header.h"; sourceTree = "<group>"; };
+		66302E222ECB26FB009EBF14 /* GSplatStruct.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GSplatStruct.swift; sourceTree = "<group>"; };
+		66302E242ECB3041009EBF14 /* SplatRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatRenderer.swift; sourceTree = "<group>"; };
+		66302E352ECB308F009EBF14 /* MultiStageRenderPath.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = MultiStageRenderPath.metal; sourceTree = "<group>"; };
+		66302E362ECB308F009EBF14 /* ShaderCommon.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderCommon.h; sourceTree = "<group>"; };
+		66302E372ECB308F009EBF14 /* SingleStageRenderPath.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SingleStageRenderPath.metal; sourceTree = "<group>"; };
+		66302E382ECB308F009EBF14 /* SplatProcessing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SplatProcessing.h; sourceTree = "<group>"; };
+		66302E392ECB308F009EBF14 /* SplatProcessing.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SplatProcessing.metal; sourceTree = "<group>"; };
+		66302E422ECB3615009EBF14 /* SplatMetalBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatMetalBuffer.swift; sourceTree = "<group>"; };
+		667877EA2ED1B518006F0793 /* GaussianConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaussianConverter.swift; sourceTree = "<group>"; };
+		667877EB2ED1B518006F0793 /* GPUUtilities.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GPUUtilities.metal; sourceTree = "<group>"; };
+		667877EC2ED1B518006F0793 /* OpenSplatKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OpenSplatKernels.metal; sourceTree = "<group>"; };
+		667877ED2ED1B518006F0793 /* RadixSort.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = RadixSort.metal; sourceTree = "<group>"; };
+		667877F22ED1B568006F0793 /* GPUUtilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GPUUtilities.swift; sourceTree = "<group>"; };
+		667877F32ED1B568006F0793 /* OpenSplatRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenSplatRenderer.swift; sourceTree = "<group>"; };
 		948146554F46E56B015690CC /* SampleCode.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = SampleCode.xcconfig; path = Configuration/SampleCode.xcconfig; sourceTree = "<group>"; };
 		B57D60B9736905755DECF7CE /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = SOURCE_ROOT; };
 		E73DD12D24636FEF00D77039 /* Point Cloud.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Point Cloud.app"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -176,13 +202,23 @@
 		0DDBAEE92E4A8EB400074FFE /* LiDAR Scanner */ = {
 			isa = PBXGroup;
 			children = (
+				667877EA2ED1B518006F0793 /* GaussianConverter.swift */,
+				667877F22ED1B568006F0793 /* GPUUtilities.swift */,
+				667877F32ED1B568006F0793 /* OpenSplatRenderer.swift */,
+				667877EB2ED1B518006F0793 /* GPUUtilities.metal */,
+				667877EC2ED1B518006F0793 /* OpenSplatKernels.metal */,
+				667877ED2ED1B518006F0793 /* RadixSort.metal */,
+				66302E422ECB3615009EBF14 /* SplatMetalBuffer.swift */,
+				66302E222ECB26FB009EBF14 /* GSplatStruct.swift */,
 				0DDBAEDE2E4A8EB400074FFE /* CpuParticle.swift */,
 				0DDBAEDF2E4A8EB400074FFE /* ExportController.swift */,
+				66302E3A2ECB308F009EBF14 /* Resources */,
 				0DDBAEE02E4A8EB400074FFE /* Helpers.swift */,
 				0DDBAEE12E4A8EB400074FFE /* MainController.swift */,
 				0DDBAEE22E4A8EB400074FFE /* MetalBuffer.swift */,
 				0DDBAEE32E4A8EB400074FFE /* PLYFile.swift */,
 				0DDBAEE42E4A8EB400074FFE /* Renderer.swift */,
+				66302E242ECB3041009EBF14 /* SplatRenderer.swift */,
 				0DDBAEE52E4A8EB400074FFE /* SaveController.swift */,
 				0DDBAEE62E4A8EB400074FFE /* Shaders.metal */,
 				0DDBAEE72E4A8EB400074FFE /* ShaderTypes.h */,
@@ -218,6 +254,18 @@
 				0DDBAEF72E4A8EB400074FFE /* SceneDepthPointCloud-Bridging-Header.h */,
 			);
 			path = SceneDepthPointCloud;
+			sourceTree = "<group>";
+		};
+		66302E3A2ECB308F009EBF14 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				66302E352ECB308F009EBF14 /* MultiStageRenderPath.metal */,
+				66302E362ECB308F009EBF14 /* ShaderCommon.h */,
+				66302E372ECB308F009EBF14 /* SingleStageRenderPath.metal */,
+				66302E382ECB308F009EBF14 /* SplatProcessing.h */,
+				66302E392ECB308F009EBF14 /* SplatProcessing.metal */,
+			);
+			path = Resources;
 			sourceTree = "<group>";
 		};
 		A6415A999BE1C768F18B2649 /* Configuration */ = {
@@ -328,13 +376,23 @@
 			buildActionMask = 2147483647;
 			files = (
 				0DDBAF062E4A8F3800074FFE /* SceneDepthPointCloud-Bridging-Header.h in Sources */,
+				667877EE2ED1B518006F0793 /* GPUUtilities.metal in Sources */,
+				667877EF2ED1B518006F0793 /* OpenSplatKernels.metal in Sources */,
+				667877F02ED1B518006F0793 /* GaussianConverter.swift in Sources */,
+				667877F12ED1B518006F0793 /* RadixSort.metal in Sources */,
 				0DDBAEF92E4A8EEB00074FFE /* MainController.swift in Sources */,
 				0DDBAEFA2E4A8EEB00074FFE /* Shaders.metal in Sources */,
+				66302E232ECB26FB009EBF14 /* GSplatStruct.swift in Sources */,
 				0DDBAEFB2E4A8EEB00074FFE /* XError.swift in Sources */,
 				0DDBAEFC2E4A8EEB00074FFE /* AppDelegate.swift in Sources */,
 				0D0F84DF2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage in Sources */,
 				0D0F84E12EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage in Sources */,
 				0DDBAEFD2E4A8EEB00074FFE /* Helpers.swift in Sources */,
+				66302E3B2ECB308F009EBF14 /* SplatProcessing.metal in Sources */,
+				66302E3C2ECB308F009EBF14 /* MultiStageRenderPath.metal in Sources */,
+				66302E3D2ECB308F009EBF14 /* SingleStageRenderPath.metal in Sources */,
+				667877F42ED1B568006F0793 /* GPUUtilities.swift in Sources */,
+				667877F52ED1B568006F0793 /* OpenSplatRenderer.swift in Sources */,
 				0DDBAEFE2E4A8EEB00074FFE /* SaveController.swift in Sources */,
 				0DDBAEFF2E4A8EEB00074FFE /* CpuParticle.swift in Sources */,
 				0DDBAF012E4A8EEB00074FFE /* ExportController.swift in Sources */,
@@ -342,7 +400,9 @@
 				0D0F84D92EA76B4D00764C00 /* ProbabilitySampler.swift in Sources */,
 				0D0F84DA2EA76B4D00764C00 /* PromptDAEngine.swift in Sources */,
 				0DDBAF032E4A8EEB00074FFE /* PLYFile.swift in Sources */,
+				66302E252ECB3041009EBF14 /* SplatRenderer.swift in Sources */,
 				0DDBAF042E4A8EEB00074FFE /* OptionSelectionController.swift in Sources */,
+				66302E432ECB3615009EBF14 /* SplatMetalBuffer.swift in Sources */,
 				0DDBAF052E4A8EEB00074FFE /* Renderer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -504,8 +564,9 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MHDGM5Z2D6;
 				INFOPLIST_FILE = SceneDepthPointCloud/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -530,8 +591,9 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = MHDGM5Z2D6;
 				INFOPLIST_FILE = SceneDepthPointCloud/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
