@@ -271,7 +271,14 @@ final class PromptDAEngine {
 
         // 4) Build LoG probability on the RGB at the same resolution as depth
         print("   • Computing LoG probability map...")
-        let probPB = try makeLoGProbability(from: scaled, size: depthPB.size)
+        
+        // Use the RENDERED pixel buffer (rgbPB), not the CIImage (scaled)
+        // The CIImage may have wrong extent due to aspect ratio preservation
+        let rgbForLoG = CIImage(cvPixelBuffer: rgbPB)
+        let colorSpaceName = rgbForLoG.colorSpace?.name as String? ?? "nil"
+        print("      → Input RGB to LoG: extent=\(rgbForLoG.extent), colorSpace=\(colorSpaceName)")
+        
+        let probPB = try makeLoGProbability(from: rgbForLoG, size: depthPB.size)
         let probW = CVPixelBufferGetWidth(probPB)
         let probH = CVPixelBufferGetHeight(probPB)
         print("   • LoG probability map: \(probW)×\(probH)")
@@ -391,236 +398,61 @@ final class PromptDAEngine {
         return pixelBuffer
     }
 
-    /// LoG = Pre-blur → Laplacian → abs → border suppression → post-smooth → clamp extremes → normalize
-    /// Hybrid approach: Combines pre-blur for noise reduction with post-smoothing for distribution
+    /// LoG probability map: Laplacian → abs → clamp values to [0,1]
     private func makeLoGProbability(from rgb: CIImage, size: CGSize) throws -> CVPixelBuffer {
-        print("      → makeLoGProbability: target size \(Int(size.width))×\(Int(size.height))")
+        print("      → makeLoGProbability: input extent \(rgb.extent), target size \(Int(size.width))×\(Int(size.height))")
 
-        let gray = rgb.toLuma().lanczosTo(size)
-
-        // Step 1: Pre-blur with Gaussian (σ=1.0) to reduce noise before Laplacian
-        // This prevents the Laplacian from being overly sensitive to high-frequency noise
-        let blurred = gray.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.0])
-        print("      → Applied pre-Gaussian blur (σ=1.0)") 
-
-        // Step 2: Apply Laplacian to smoothed image (true Laplacian of Gaussian)
-        let lap = blurred.clampedToExtent().applyingFilter("CIConvolution3X3", parameters: [
-            "inputWeights": CIVector(values: [
-                0,  1, 0,
-                1, -4, 1,
-                0,  1, 0
-            ], count: 9),
+        // Step 1: Grayscale (luma)
+        let gray = rgb.toLuma()
+        
+        // Step 2: Laplacian kernel
+        let laplacian = gray.applyingFilter("CIConvolution3X3", parameters: [
+            "inputWeights": CIVector(values: [0, 1, 0, 1, -4, 1, 0, 1, 0], count: 9),
             "inputBias": 0
-        ]).cropped(to: blurred.extent)
-
-        // Step 3: Render Laplacian result to pixel buffer
-        let W = Int(size.width)
-        let H = Int(size.height)
-
-        let attrs: [CFString: Any] = [
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            kCVPixelBufferMetalCompatibilityKey: true
-        ]
-
-        // Buffer for Laplacian result (before smoothing)
-        var lapPB: CVPixelBuffer?
-        var status = CVPixelBufferCreate(kCFAllocatorDefault, W, H,
-                                        kCVPixelFormatType_OneComponent32Float,
-                                        attrs as CFDictionary, &lapPB)
-        guard status == kCVReturnSuccess, let laplacianBuffer = lapPB else {
-            print("      ❌ Failed to create Laplacian buffer: status=\(status)")
-            throw NSError(domain: "PromptDAEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create Laplacian buffer"])
-        }
-        ctx.render(lap, to: laplacianBuffer)
-
-        // Step 4: Take absolute value, clamp extreme values, and zero out border
-        CVPixelBufferLockBaseAddress(laplacianBuffer, [])
-        let stride = CVPixelBufferGetBytesPerRow(laplacianBuffer) / MemoryLayout<Float>.stride
-        let lapBuf = CVPixelBufferGetBaseAddress(laplacianBuffer)!.assumingMemoryBound(to: Float.self)
-
-        // First pass: take absolute value and find max for clamping
-        var maxResponse: Float = 0
-        for y in 0..<H {
-            for x in 0..<W {
-                let i = y * stride + x
-                lapBuf[i] = fabsf(lapBuf[i])
-                maxResponse = max(maxResponse, lapBuf[i])
-            }
-        }
-
-        // Second pass: Zero out border and clamp extreme values
-        let borderSize = 10  // Moderate border suppression
-        let clampThreshold = maxResponse * 0.15  // Clamp top 15% to prevent hot spots
-
-        for y in 0..<H {
-            for x in 0..<W {
-                let i = y * stride + x
-
-                // Zero out 10-pixel border to avoid edge artifacts
-                if x < borderSize || x >= W-borderSize || y < borderSize || y >= H-borderSize {
-                    lapBuf[i] = 0
-                } else {
-                    // Clamp extreme values to prevent single pixels from dominating
-                    if lapBuf[i] > clampThreshold {
-                        lapBuf[i] = clampThreshold
-                    }
-                }
-            }
-        }
-        CVPixelBufferUnlockBaseAddress(laplacianBuffer, [])
-
-        print("      → Applied Laplacian: max=\(String(format: "%.3f", maxResponse)), clamped to \(String(format: "%.3f", clampThreshold)), border=\(borderSize)px")
-
-        // Step 5: Apply second Gaussian smoothing using Metal compute shader
-        // This spreads the LoG response spatially for better sampling distribution
-        var smoothPB: CVPixelBuffer?
-        status = CVPixelBufferCreate(kCFAllocatorDefault, W, H,
-                                    kCVPixelFormatType_OneComponent32Float,
-                                    attrs as CFDictionary, &smoothPB)
-        guard status == kCVReturnSuccess, let smoothedBuffer = smoothPB else {
-            print("      ❌ Failed to create smoothed buffer: status=\(status)")
-            throw NSError(domain: "PromptDAEngine", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to create smoothed buffer"])
-        }
-
-        // Create Metal textures from pixel buffers
-        var lapTextureCache: CVMetalTextureCache?
-        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, metalDevice, nil, &lapTextureCache)
-        guard let textureCache = lapTextureCache else {
-            print("      ❌ Failed to create texture cache")
-            throw NSError(domain: "PromptDAEngine", code: 8, userInfo: [NSLocalizedDescriptionKey: "Failed to create texture cache"])
-        }
-
-        var lapTextureCacheRef: CVMetalTexture?
-        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, laplacianBuffer, nil,
-                                                  .r32Float, W, H, 0, &lapTextureCacheRef)
-        guard let lapTexture = lapTextureCacheRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
-            print("      ❌ Failed to create input texture")
-            throw NSError(domain: "PromptDAEngine", code: 9, userInfo: [NSLocalizedDescriptionKey: "Failed to create input texture"])
-        }
-
-        var smoothTextureCacheRef: CVMetalTexture?
-        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, textureCache, smoothedBuffer, nil,
-                                                  .r32Float, W, H, 0, &smoothTextureCacheRef)
-        guard let smoothTexture = smoothTextureCacheRef.flatMap({ CVMetalTextureGetTexture($0) }) else {
-            print("      ❌ Failed to create output texture")
-            throw NSError(domain: "PromptDAEngine", code: 10, userInfo: [NSLocalizedDescriptionKey: "Failed to create output texture"])
-        }
-
-        // Execute Metal compute shader
-        guard let commandBuffer = metalCommandQueue.makeCommandBuffer(),
-              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
-            print("      ❌ Failed to create Metal command buffer/encoder")
-            throw NSError(domain: "PromptDAEngine", code: 11, userInfo: [NSLocalizedDescriptionKey: "Failed to create Metal command buffer"])
-        }
-
-        computeEncoder.setComputePipelineState(smoothingPipeline)
-        computeEncoder.setTexture(lapTexture, index: 0)
-        computeEncoder.setTexture(smoothTexture, index: 1)
-
-        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        let threadGroups = MTLSize(
-            width: (W + threadGroupSize.width - 1) / threadGroupSize.width,
-            height: (H + threadGroupSize.height - 1) / threadGroupSize.height,
-            depth: 1
-        )
-
-        computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
-        computeEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        print("      → Applied second Gaussian smoothing (Metal compute)")
-
-        // Step 6: Clamp to [0, 1] and normalize to sum=1 (proper probability distribution)
-        CVPixelBufferLockBaseAddress(smoothedBuffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(smoothedBuffer, []) }
-
-        let smoothStride = CVPixelBufferGetBytesPerRow(smoothedBuffer) / MemoryLayout<Float>.stride
-        let smoothBuf = CVPixelBufferGetBaseAddress(smoothedBuffer)!.assumingMemoryBound(to: Float.self)
-
-        var total: Float = 0
-        var minVal: Float = .infinity
-        var maxVal: Float = -.infinity
-
-        // Clamp to [0, 1] and accumulate sum
-        for y in 0..<H {
-            for x in 0..<W {
-                let i = y * smoothStride + x
-                smoothBuf[i] = min(max(smoothBuf[i], 0.0), 1.0)  // Clamp [0, 1]
-                total += smoothBuf[i]
-                if smoothBuf[i] > 0 {
-                    minVal = min(minVal, smoothBuf[i])
-                    maxVal = max(maxVal, smoothBuf[i])
-                }
-            }
-        }
-
-        print("      → Clamped to [0,1]: min=\(String(format: "%.6f", minVal)), max=\(String(format: "%.6f", maxVal)), sum=\(String(format: "%.3f", total))")
-
-        // Normalize to sum=1 (proper probability distribution)
-        let eps: Float = 1e-6
-        guard total > eps else {
-            print("      ⚠️ Warning: LoG sum is near zero, using uniform distribution")
-            let uniform = 1.0 / Float(W * H)
-            for y in 0..<H {
-                for x in 0..<W {
-                    smoothBuf[y * smoothStride + x] = uniform
-                }
-            }
-            return smoothedBuffer
-        }
-
-        let inv = 1.0 / total
-        for y in 0..<H {
-            for x in 0..<W {
-                smoothBuf[y * smoothStride + x] *= inv
-            }
-        }
-
-        print("      → Normalized to probability distribution (sum=1.0)")
-
-        return smoothedBuffer
-    }
-
-    private func makeNewLoGProbability(from rgb: CIImage, size: CGSize) throws -> CVPixelBuffer {
-
-        // Convert to grayscale and resize for running the Laplacian
-        let gray = rgb.toGray().lanczosTo(size)
-
-        // Apply Laplacian filter
-        let lap = gray.clampedToExtent().applyingFilter("CIConvolution3X3", parameters: [
-            "inputWeights": CIVector(values: [
-                0,  1, 0,
-                1, -4, 1,
-                0,  1, 0
-            ], count: 9),
-            "inputBias": 0
-        ]).cropped(to: gray.extent)
-
-        // Remove edges by cropping pixels from each side
-        let removalBorder: CGFloat = 2
-        let cropped = lap.cropped(to: CGRect(x: removalBorder, y: removalBorder, width: size.width - 2 * removalBorder, height: size.height - 2 * removalBorder))
-
-        // Taking absolute value of the Laplacian response
-        let absLaplacian = cropped.applyingFilter("CIAbsoluteDifference", parameters: [
-            "inputImage2": CIImage(color: .black).cropped(to: cropped.extent)
         ])
-
-        // Apply Gaussian blur to the absolute Laplacian
-        let blurred = absLaplacian.applyingFilter("CIGaussianBlur", parameters: [
-            "inputRadius": 1.0
+        
+        // Step 3: Absolute value
+        let abs = laplacian.applyingFilter("CIColorAbsoluteDifference", parameters: [
+            "inputImage2": CIImage(color: .black)
         ])
-
-        // Clamping to [0, 1]
-        let clamped = blurred.applyingFilter("CIColorClamp", parameters: [
+        
+        // Step 4: Clamp pixel VALUES to [0, 1] (not extent, just values)
+        let clamped = abs.applyingFilter("CIColorClamp", parameters: [
             "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
             "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
         ])
-
-        return clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: size)
+        
+        // Step 5: Render to pixel buffer
+        let pixelBuffer = try clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: size)
+        
+        // 6. Check what we got
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        
+        let W = Int(size.width)
+        let H = Int(size.height)
+        let stride = CVPixelBufferGetBytesPerRow(pixelBuffer) / MemoryLayout<Float>.stride
+        let buf = CVPixelBufferGetBaseAddress(pixelBuffer)!.assumingMemoryBound(to: Float.self)
+        
+        var count = 0
+        var sum: Float = 0
+        var maxVal: Float = 0
+        
+        for y in 0..<H {
+            for x in 0..<W {
+                let v = buf[y * stride + x]
+                if v > 0 {
+                    count += 1
+                    sum += v
+                    maxVal = max(maxVal, v)
+                }
+            }
+        }
+        
+        print("      → Rendered buffer: \(count)/\(W*H) non-zero, max=\(String(format: "%.6f", maxVal)), sum=\(String(format: "%.3f", sum))")
+        
+        return pixelBuffer
     }
-    
-    
 }
 
 private extension CIImage {
@@ -632,14 +464,19 @@ private extension CIImage {
             "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
         ])
     }
+    
     func toGray() -> CIImage {
-        applyingFilter("CIColorMatrix", parameters: [
-            "inputRVector": CIVector(x: 1, y: 0,      z: 0,      w: 0),
-            "inputGVector": CIVector(x: 0,      y: 1, z: 0,      w: 0),
-            "inputBVector": CIVector(x: 0,      y: 0,      z: 1, w: 0),
+        // Equal weighting of R, G, B channels: output = (R + G + B) / 3
+        // Each output channel gets the same gray value
+        let w: CGFloat = 1.0 / 3.0
+        return applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: w, y: w, z: w, w: 0),  // R channel gets (R+G+B)/3
+            "inputGVector": CIVector(x: w, y: w, z: w, w: 0),  // G channel gets (R+G+B)/3
+            "inputBVector": CIVector(x: w, y: w, z: w, w: 0),  // B channel gets (R+G+B)/3
             "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
         ])
     }
+    
     func lanczosTo(_ size: CGSize) -> CIImage {
         let sx = size.width/extent.width, sy = size.height/extent.height
         let f = CIFilter(name:"CILanczosScaleTransform")!
@@ -648,6 +485,29 @@ private extension CIImage {
         f.setValue(sx/sy, forKey:"inputAspectRatio")
         let img = (f.outputImage ?? self).cropped(to: .init(origin:.zero, size:size))
         return img
+    }
+    
+    func toPixelBuffer(context: CIContext, pixelFormat: OSType, size: CGSize) throws -> CVPixelBuffer {
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true
+        ]
+        
+        var pb: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, Int(size.width), Int(size.height),
+                                        pixelFormat, attrs as CFDictionary, &pb)
+        guard status == kCVReturnSuccess, let pixelBuffer = pb else {
+            throw NSError(domain: "PromptDAEngine", code: 3, 
+                         userInfo: [NSLocalizedDescriptionKey: "Failed to create pixel buffer: status=\(status)"])
+        }
+        
+        // CRITICAL: Use explicit bounds starting at origin (0,0)
+        // CIImage extent might have non-zero origin which causes misalignment
+        let renderBounds = CGRect(origin: .zero, size: size)
+        let colorSpace = CGColorSpaceCreateDeviceGray()  // Use device gray for single-channel
+        
+        context.render(self, to: pixelBuffer, bounds: renderBounds, colorSpace: colorSpace)
+        return pixelBuffer
     }
 }
 

@@ -347,6 +347,13 @@ final class Renderer {
             return updateLiDARDepthTextures(frame: frame)
         }
         
+        // Clear old particles on first MVS frame to avoid mixing LiDAR and MVS points
+        // Check if we're transitioning from another mode
+        if currentPointCount > 0 && cachedProbSamples == nil {
+            print("🧹 Clearing old particles before first MVS frame (had \(currentPointCount) old points)")
+            clearParticles()
+        }
+        
         // Log input data
         let rgbW = CVPixelBufferGetWidth(frame.capturedImage)
         let rgbH = CVPixelBufferGetHeight(frame.capturedImage)
@@ -382,10 +389,13 @@ final class Renderer {
             print("   • PromptDA output depth: \(depthW)×\(depthH)")
             print("   • LoG probability map: \(probW)×\(probH)")
             
-            // Use Bernoulli sampling for intelligent point placement (stochastic sample count)
-            let pixels = ProbabilitySampler.samplePixelsBernoulli(probPB: output.probPB, scale: 2)
+            // Use Bernoulli sampling with scale factor of 2.0
+            // Each pixel with LoG value p (0-1) is sampled with probability min(p * 2, 1.0)
+            // This means edges (p≈1.0) → 100% sampled, flat regions (p≈0.1) → 20% sampled
+            let scaleFactor: Float = 2.0
+            let pixels = ProbabilitySampler.samplePixelsBernoulli(probPB: output.probPB, scale: scaleFactor)
             
-            print("   • Sampled \(pixels.count) points from LoG probability distribution (Bernoulli)")
+            print("   • Sampled \(pixels.count) points from LoG (Bernoulli, scale=\(scaleFactor))")
             
             // Convert probability samples from PromptDA resolution to camera resolution
             // PromptDA outputs at 518×518, but camera is 1920×1440
@@ -939,6 +949,7 @@ private extension Renderer {
         }
         
         // Fallback to uniform hexagonal grid (original behavior for LiDAR)
+        print("📊 Using uniform hexagonal grid: ~\(numGridPoints) points")
         let gridArea = cameraResolution.x * cameraResolution.y
         let spacing = sqrt(gridArea / Float(numGridPoints))
         let deltaX = Int(round(cameraResolution.x / spacing))
