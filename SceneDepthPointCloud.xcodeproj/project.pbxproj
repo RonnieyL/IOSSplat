@@ -11,6 +11,7 @@
 		0D0F84DA2EA76B4D00764C00 /* PromptDAEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D0F84D82EA76B4D00764C00 /* PromptDAEngine.swift */; };
 		0D0F84DF2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 0D0F84DE2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage */; };
 		0D0F84E12EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 0D0F84E02EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage */; };
+		0D43BE472ED3AE680060CF78 /* SamplingCheckerController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D43BE462ED3AE680060CF78 /* SamplingCheckerController.swift */; };
 		0DDBAEF92E4A8EEB00074FFE /* MainController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE12E4A8EB400074FFE /* MainController.swift */; };
 		0DDBAEFA2E4A8EEB00074FFE /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE62E4A8EB400074FFE /* Shaders.metal */; };
 		0DDBAEFB2E4A8EEB00074FFE /* XError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE82E4A8EB400074FFE /* XError.swift */; };
@@ -34,6 +35,7 @@
 		0D0F84DB2EA76FB700764C00 /* PromptDA_vits_518x518_prompt180x320.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = PromptDA_vits_518x518_prompt180x320.mlpackage; sourceTree = "<group>"; };
 		0D0F84DE2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = PromptDA_vits_518x518_prompt192x256.mlpackage; sourceTree = "<group>"; };
 		0D0F84E02EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage */ = {isa = PBXFileReference; lastKnownFileType = folder.mlpackage; path = PromptDA_vits_518x518_prompt256x192.mlpackage; sourceTree = "<group>"; };
+		0D43BE462ED3AE680060CF78 /* SamplingCheckerController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SamplingCheckerController.swift; sourceTree = "<group>"; };
 		0D58E5682E47CE9B007974B4 /* feature_detector.cpython-312.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "feature_detector.cpython-312.pyc"; sourceTree = "<group>"; };
 		0D58E5692E47CE9B007974B4 /* guided_mvs.cpython-312.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "guided_mvs.cpython-312.pyc"; sourceTree = "<group>"; };
 		0D58E56A2E47CE9B007974B4 /* matcher.cpython-312.pyc */ = {isa = PBXFileReference; lastKnownFileType = file; path = "matcher.cpython-312.pyc"; sourceTree = "<group>"; };
@@ -207,6 +209,7 @@
 			children = (
 				0D0F84D72EA76B4D00764C00 /* ProbabilitySampler.swift */,
 				0D0F84D82EA76B4D00764C00 /* PromptDAEngine.swift */,
+				0D43BE462ED3AE680060CF78 /* SamplingCheckerController.swift */,
 				0DDBAEE92E4A8EB400074FFE /* LiDAR Scanner */,
 				0DDBAEED2E4A8EB400074FFE /* Models */,
 				0DDBAEEE2E4A8EB400074FFE /* AppDelegate.swift */,
@@ -333,6 +336,7 @@
 				0DDBAEFB2E4A8EEB00074FFE /* XError.swift in Sources */,
 				0DDBAEFC2E4A8EEB00074FFE /* AppDelegate.swift in Sources */,
 				0D0F84DF2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage in Sources */,
+				0D43BE472ED3AE680060CF78 /* SamplingCheckerController.swift in Sources */,
 				0D0F84E12EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage in Sources */,
 				0DDBAEFD2E4A8EEB00074FFE /* Helpers.swift in Sources */,
 				0DDBAEFE2E4A8EEB00074FFE /* SaveController.swift in Sources */,
