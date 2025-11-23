@@ -106,23 +106,38 @@ class GPUUtilities {
     /**
      Synchronously compute prefix sum and read result to CPU
      Useful for getting total sum (e.g., total intersection count)
+     
+     Uses staging buffers to read from GPU-private buffers without CPU access
      */
     func exclusivePrefixSumSync(input: MTLBuffer, output: MTLBuffer, count: Int) -> Int {
+        guard count > 0 else { return 0 }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return 0 }
 
         _ = exclusivePrefixSum(commandBuffer: commandBuffer, input: input, output: output, count: count)
 
+        // Create small staging buffers to read just the last elements we need
+        // Use .storageModeShared so CPU can read them
+        guard let stagingOutput = device.makeBuffer(length: MemoryLayout<Int32>.stride, options: .storageModeShared),
+              let stagingInput = device.makeBuffer(length: MemoryLayout<Int32>.stride, options: .storageModeShared),
+              let blitEncoder = commandBuffer.makeBlitCommandEncoder() else {
+            commandBuffer.commit()
+            return 0
+        }
+        
+        // Copy just the last element from each buffer (GPU -> staging)
+        let lastElementOffset = (count - 1) * MemoryLayout<Int32>.stride
+        blitEncoder.copy(from: output, sourceOffset: lastElementOffset, to: stagingOutput, destinationOffset: 0, size: MemoryLayout<Int32>.stride)
+        blitEncoder.copy(from: input, sourceOffset: lastElementOffset, to: stagingInput, destinationOffset: 0, size: MemoryLayout<Int32>.stride)
+        blitEncoder.endEncoding()
+        
         commandBuffer.commit()
         commandBuffer.waitUntilCompleted()
 
-        // Read the last element of output + last element of input to get total
-        let outputPtr = output.contents().bindMemory(to: Int32.self, capacity: count)
-        let inputPtr = input.contents().bindMemory(to: Int32.self, capacity: count)
+        // Read from staging buffers (CPU-accessible)
+        let outputPtr = stagingOutput.contents().bindMemory(to: Int32.self, capacity: 1)
+        let inputPtr = stagingInput.contents().bindMemory(to: Int32.self, capacity: 1)
 
-        if count > 0 {
-            return Int(outputPtr[count - 1] + inputPtr[count - 1])
-        }
-        return 0
+        return Int(outputPtr[0] + inputPtr[0])
     }
 
     // MARK: - Radix Sort

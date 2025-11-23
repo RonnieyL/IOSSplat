@@ -53,6 +53,27 @@ struct GaussianUniforms {
     packed_half3 covB;         // 3D covariance lower triangle (6 bytes, offset 26)
     // Total: 32 bytes (reduced from 56 bytes - more efficient!)
 };
+
+// OpenSplat-native Gaussian struct (stores scale+quaternion directly)
+// No per-frame eigendecomposition needed!
+// Using explicit components for precise layout control
+struct OpenSplatGaussian {
+    float position_x;     // offset 0
+    float position_y;     // offset 4
+    float position_z;     // offset 8
+    float scale_x;        // offset 12
+    float scale_y;        // offset 16
+    float scale_z;        // offset 20
+    float quat_x;         // offset 24
+    float quat_y;         // offset 28
+    float quat_z;         // offset 32
+    float quat_w;         // offset 36
+    half color_r;         // offset 40
+    half color_g;         // offset 42
+    half color_b;         // offset 44
+    half opacity;         // offset 46
+    // Total: 48 bytes
+};
 #endif
 
 #endif /* ShaderTypes_h */

@@ -109,13 +109,14 @@ inline float4 transform_4x4(constant float *mat, const float3 p) {
 
 inline float3x3 quat_to_rotmat(const float4 quat) {
     // quat to rotation matrix
+    // Input format: (x, y, z, w)
     float s = rsqrt(
         quat.w * quat.w + quat.x * quat.x + quat.y * quat.y + quat.z * quat.z
     );
-    float w = quat.x * s;
-    float x = quat.y * s;
-    float y = quat.z * s;
-    float z = quat.w * s;
+    float x = quat.x * s;
+    float y = quat.y * s;
+    float z = quat.z * s;
+    float w = quat.w * s;
 
     // metal matrices are column-major
     return float3x3(
@@ -388,22 +389,28 @@ kernel void project_gaussians_forward_kernel(
 
     float3 p_world = read_packed_float3(means3d, idx);
     float3 p_view;
-    if (clip_near_plane(p_world, viewmat, p_view, clip_thresh)) {
+    bool clipped = clip_near_plane(p_world, viewmat, p_view, clip_thresh);
+
+    // DEBUG: Always write p_view.z to depths so we can diagnose clipping
+    depths[idx] = p_view.z;
+
+    if (clipped) {
+        // Clipped by near plane - mark with negative radius
+        radii[idx] = -1;  // -1 indicates near-plane clipping
         return;
     }
 
-    // compute the projected covariance with distance-based scaling
+    // compute the projected covariance
     float3 scale = read_packed_float3(scales, idx);
-
-    // Apply distance-based scaling to maintain consistent screen-space size
-    // Scale proportional to depth: distant gaussians appear larger to maintain visibility
     float depth = p_view.z;
-    float distance_scale_factor = max(1.0f, depth * 0.5f);  // Scale by 0.5*depth, minimum 1.0
-    float3 adjusted_scale = scale * distance_scale_factor;
+
+    // REMOVED: Distance-based scaling was causing buffer overflow
+    // Old: float distance_scale_factor = max(1.0f, depth * 0.5f);
+    // Gaussians now use constant scale - adjust base scale in Shaders.metal instead
 
     float4 quat = read_packed_float4(quats, idx);
     device float *cur_cov3d = &(covs3d[6 * idx]);
-    scale_rot_to_cov3d(adjusted_scale, glob_scale, quat, cur_cov3d);
+    scale_rot_to_cov3d(scale, glob_scale, quat, cur_cov3d);
 
     // project to 2d with ewa approximation
     float fx = intrins.x;
@@ -420,18 +427,41 @@ kernel void project_gaussians_forward_kernel(
     float radius;
     bool ok = compute_cov2d_bounds(cov2d, conic, radius);
     if (!ok) {
-        return; // zero determinant
+        // Zero determinant - mark with radius=-2
+        radii[idx] = -2;
+        return;
     }
+    
+    // CRITICAL: Clamp radius to prevent buffer overflow
+    // Large radii cause thousands of tile intersections per gaussian
+    // MAX_RADIUS=32 → max ~(64/16)^2 = 16 tiles per gaussian
+    const float MAX_RADIUS = 32.0f;  
+    radius = min(radius, MAX_RADIUS);
+    
     write_packed_float3(conics, idx, conic);
 
     // compute the projected mean
+    // Use p_world (world space) - OpenSplat's project_pix handles the full transform
     float2 center = project_pix(projmat, p_world, img_size, {cx, cy});
+
+    // DEBUG: Always write center to xys for diagnostics
+    write_packed_float2(xys, idx, center);
+
     uint2 tile_min, tile_max;
     get_tile_bbox(center, radius, (int3)tile_bounds, tile_min, tile_max);
     int32_t tile_area = (tile_max.x - tile_min.x) * (tile_max.y - tile_min.y);
     if (tile_area <= 0) {
+        // No tile coverage - mark with radius=-3
+        // Store the actual radius for debugging
+        radii[idx] = -3;
         return;
     }
+
+    // DEBUG: Log first few successful gaussians
+    // if (idx < 3) {
+    //     printf("[GPU] Gaussian %d SUCCESS: tile_area=%d, depth=%.3f, radius=%d, center=(%.1f, %.1f)\n",
+    //            idx, tile_area, p_view.z, (int)radius, center.x, center.y);
+    // }
 
     num_tiles_hit[idx] = tile_area;
     depths[idx] = p_view.z;
@@ -1439,4 +1469,30 @@ kernel void compute_cov2d_bounds_kernel(
     conics[index + 1] = conic.y;
     conics[index + 2] = conic.z;
     radii[row] = radius;
+}
+
+// Copy rendered image buffer to texture for display
+kernel void copy_image_to_texture(
+    constant float* img_buffer,     // RGB float buffer [width * height * 3]
+    texture2d<float, access::write> output [[texture(0)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint width = output.get_width();
+    uint height = output.get_height();
+    
+    if (gid.x >= width || gid.y >= height) {
+        return;
+    }
+    
+    // Read RGB from packed buffer
+    uint pix_id = gid.y * width + gid.x;
+    float3 rgb = float3(
+        img_buffer[3 * pix_id + 0],
+        img_buffer[3 * pix_id + 1],
+        img_buffer[3 * pix_id + 2]
+    );
+    
+    // Clamp to [0, 1] and write to texture with full opacity
+    rgb = clamp(rgb, 0.0f, 1.0f);
+    output.write(float4(rgb, 1.0), gid);
 }

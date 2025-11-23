@@ -26,6 +26,9 @@
 		0DDBAF062E4A8F3800074FFE /* SceneDepthPointCloud-Bridging-Header.h in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEF72E4A8EB400074FFE /* SceneDepthPointCloud-Bridging-Header.h */; };
 		0DDBAF072E4A8F4E00074FFE /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DDBAEF32E4A8EB400074FFE /* LaunchScreen.storyboard */; };
 		0DDBAF082E4A8F4E00074FFE /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 0DDBAEF52E4A8EB400074FFE /* Main.storyboard */; };
+		66302E3B2ECB308F009EBF14 /* SplatProcessing.metal in Sources */ = {isa = PBXBuildFile; fileRef = 66302E392ECB308F009EBF14 /* SplatProcessing.metal */; };
+		66302E3C2ECB308F009EBF14 /* MultiStageRenderPath.metal in Sources */ = {isa = PBXBuildFile; fileRef = 66302E352ECB308F009EBF14 /* MultiStageRenderPath.metal */; };
+		66302E3D2ECB308F009EBF14 /* SingleStageRenderPath.metal in Sources */ = {isa = PBXBuildFile; fileRef = 66302E372ECB308F009EBF14 /* SingleStageRenderPath.metal */; };
 		66302E432ECB3615009EBF14 /* SplatMetalBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66302E422ECB3615009EBF14 /* SplatMetalBuffer.swift */; };
 		667877EE2ED1B518006F0793 /* GPUUtilities.metal in Sources */ = {isa = PBXBuildFile; fileRef = 667877EB2ED1B518006F0793 /* GPUUtilities.metal */; };
 		667877EF2ED1B518006F0793 /* OpenSplatKernels.metal in Sources */ = {isa = PBXBuildFile; fileRef = 667877EC2ED1B518006F0793 /* OpenSplatKernels.metal */; };
@@ -91,7 +94,11 @@
 		0DDBAEF42E4A8EB400074FFE /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		0DDBAEF62E4A8EB400074FFE /* OptionSelectionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptionSelectionController.swift; sourceTree = "<group>"; };
 		0DDBAEF72E4A8EB400074FFE /* SceneDepthPointCloud-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SceneDepthPointCloud-Bridging-Header.h"; sourceTree = "<group>"; };
+		66302E352ECB308F009EBF14 /* MultiStageRenderPath.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = MultiStageRenderPath.metal; sourceTree = "<group>"; };
 		66302E362ECB308F009EBF14 /* ShaderCommon.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderCommon.h; sourceTree = "<group>"; };
+		66302E372ECB308F009EBF14 /* SingleStageRenderPath.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SingleStageRenderPath.metal; sourceTree = "<group>"; };
+		66302E382ECB308F009EBF14 /* SplatProcessing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SplatProcessing.h; sourceTree = "<group>"; };
+		66302E392ECB308F009EBF14 /* SplatProcessing.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SplatProcessing.metal; sourceTree = "<group>"; };
 		66302E422ECB3615009EBF14 /* SplatMetalBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatMetalBuffer.swift; sourceTree = "<group>"; };
 		667877EB2ED1B518006F0793 /* GPUUtilities.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = GPUUtilities.metal; sourceTree = "<group>"; };
 		667877EC2ED1B518006F0793 /* OpenSplatKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = OpenSplatKernels.metal; sourceTree = "<group>"; };
@@ -243,7 +250,11 @@
 		66302E3A2ECB308F009EBF14 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				66302E352ECB308F009EBF14 /* MultiStageRenderPath.metal */,
 				66302E362ECB308F009EBF14 /* ShaderCommon.h */,
+				66302E372ECB308F009EBF14 /* SingleStageRenderPath.metal */,
+				66302E382ECB308F009EBF14 /* SplatProcessing.h */,
+				66302E392ECB308F009EBF14 /* SplatProcessing.metal */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -366,6 +377,9 @@
 				0D0F84DF2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage in Sources */,
 				0D0F84E12EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage in Sources */,
 				0DDBAEFD2E4A8EEB00074FFE /* Helpers.swift in Sources */,
+				66302E3B2ECB308F009EBF14 /* SplatProcessing.metal in Sources */,
+				66302E3C2ECB308F009EBF14 /* MultiStageRenderPath.metal in Sources */,
+				66302E3D2ECB308F009EBF14 /* SingleStageRenderPath.metal in Sources */,
 				667877F42ED1B568006F0793 /* GPUUtilities.swift in Sources */,
 				667877F52ED1B568006F0793 /* OpenSplatRenderer.swift in Sources */,
 				0DDBAEFE2E4A8EEB00074FFE /* SaveController.swift in Sources */,
