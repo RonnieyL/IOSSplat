@@ -13,7 +13,7 @@ import Photos
 // MARK: - Core Metal Scan Renderer
 final class Renderer {
     var savedCloudURLs = [URL]()
-    private var cpuParticlesBuffer = [CPUParticle]()
+    var cpuParticlesBuffer = [CPUParticle]()
     var showParticles = true
     var isInViewSceneMode = true
     var isSavingFile = false
@@ -44,9 +44,9 @@ final class Renderer {
     }
     private var dataExtractionInterval: TimeInterval = 1.0 / 3.0
     private var lastDataExtractionTime: TimeInterval = 0
-    private var frameCounter = 0
-    private var extractedFrameCounter = 0
-    private var currentScanFolderName = ""
+    var frameCounter = 0
+    var extractedFrameCounter = 0
+    var currentScanFolderName = ""
     // We only use portrait orientation in this app
     private let orientation = UIInterfaceOrientation.portrait
     // Camera's threshold values for detecting when the camera moves so that we can accumulate the points
@@ -84,7 +84,7 @@ final class Renderer {
     private var viewportSize = CGSize()
     // The grid of sample points
     private lazy var gridPointsBuffer = MetalBuffer<Float2>(device: device,
-                                                            array: makeGridPoints(),
+                                                            array: makeGridPoints(frame: nil),
                                                             index: kGridPoints.rawValue, options: [])
 
     // RGB buffer
@@ -125,11 +125,11 @@ final class Renderer {
     
     // PromptDA + LoG sampling support
     private var promptDAEngine: PromptDAEngine?
-    private var cachedProbSamples: [Float2]?
+    var totalSmartSamplingPoints: Int = 0
     
     // Depth photo saving
-    private var depthPhotoCounter = 0
-    private var shouldSaveNextDepth = false
+    var depthPhotoCounter = 0
+    var shouldSaveNextDepth = false
 
     var rgbOn: Bool = false {
         didSet {
@@ -164,38 +164,24 @@ final class Renderer {
         inFlightSemaphore = DispatchSemaphore(value: maxInFlightBuffers)
         
         // Try to initialize PromptDA engine (will be used if depthSource == .mvs)
-        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        print("🔧 Renderer: Initializing PromptDA Engine...")
-        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        do {
-            let startTime = CFAbsoluteTimeGetCurrent()
-            // Use 256×192 prompt size (matches ARKit depth directly, no rotation)
-            promptDAEngine = try PromptDAEngine.create(
-                bundleModelName: "PromptDA_vits_518x518_prompt256x192",
-                rgbSize: .init(width: 518, height: 518),
-                promptHW: (256, 192)
-            )
-            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("✅ Renderer: PromptDA ready! (loaded in \(String(format: "%.2f", elapsed))s)")
-            print("   MVS mode is available")
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-        } catch {
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            print("⚠️ Renderer: PromptDA NOT available")
-            print("   Error: \(error.localizedDescription)")
-            if let nsError = error as NSError? {
-                print("   Domain: \(nsError.domain)")
-                print("   Code: \(nsError.code)")
-                if let reason = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String {
-                    print("   Reason: \(reason)")
+        case .mvs:
+            do {
+                // Use 256×192 prompt size (matches ARKit depth directly, no rotation)
+                promptDAEngine = try PromptDAEngine.create(
+                    bundleModelName: "PromptDA_vits_518x518_prompt256x192",
+                    rgbSize: .init(width: 518, height: 518),
+                    promptHW: (256, 192)
+                )
+            } catch {
+                print("   Error: \(error.localizedDescription)")
+                if let nsError = error as NSError? {
+                    print("   Domain: \(nsError.domain)")
+                    print("   Code: \(nsError.code)")
+                    if let reason = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String {
+                        print("   Reason: \(reason)")
+                    }
                 }
             }
-            print("   → MVS mode will fall back to LiDAR")
-            print("   → Add the PromptDA .mlpackage to Xcode project to enable MVS")
-            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
-        }
-        
         self.loadSavedClouds()
     }
 
@@ -231,17 +217,6 @@ final class Renderer {
                 return false
         }
 
-        let depthW = CVPixelBufferGetWidth(depthMap)
-        let depthH = CVPixelBufferGetHeight(depthMap)
-        let confW = CVPixelBufferGetWidth(confidenceMap)
-        let confH = CVPixelBufferGetHeight(confidenceMap)
-        
-        print("📍 LiDAR Mode:")
-        print("   • Smoothed depth resolution: \(depthW)×\(depthH)")
-        print("   • Confidence map resolution: \(confW)×\(confH)")
-        print("   • Camera resolution: \(Int(cameraResolution.x))×\(Int(cameraResolution.y))")
-        print("   • Grid points: \(numGridPoints) (uniform grid)")
-
         depthTexture = makeTexture(fromPixelBuffer: depthMap, pixelFormat: .r32Float, planeIndex: 0)
         confidenceTexture = makeTexture(fromPixelBuffer: confidenceMap, pixelFormat: .r8Uint, planeIndex: 0)
         
@@ -257,108 +232,10 @@ final class Renderer {
         return true
     }
     
-    // Save ARKit depth map as a photo in Photos app
-    private func saveDepthAsPhoto(_ depthPixelBuffer: CVPixelBuffer) {
-        depthPhotoCounter += 1
-        
-        print("📸 Saving ARKit depth map as photo...")
-        
-        // Convert depth to visible image (normalize to 0-255)
-        let width = CVPixelBufferGetWidth(depthPixelBuffer)
-        let height = CVPixelBufferGetHeight(depthPixelBuffer)
-        
-        CVPixelBufferLockBaseAddress(depthPixelBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthPixelBuffer, .readOnly) }
-        
-        let stride = CVPixelBufferGetBytesPerRow(depthPixelBuffer) / MemoryLayout<Float>.stride
-        let depthData = CVPixelBufferGetBaseAddress(depthPixelBuffer)!.assumingMemoryBound(to: Float.self)
-        
-        // Find min/max for normalization
-        var minDepth: Float = .infinity
-        var maxDepth: Float = -.infinity
-        for y in 0..<height {
-            for x in 0..<width {
-                let depth = depthData[y * stride + x]
-                if depth > 0 && depth.isFinite {
-                    minDepth = min(minDepth, depth)
-                    maxDepth = max(maxDepth, depth)
-                }
-            }
-        }
-        
-        print("   • Depth range: \(String(format: "%.3f", minDepth))m - \(String(format: "%.3f", maxDepth))m")
-        
-        // Create grayscale image
-        var grayData = [UInt8](repeating: 0, count: width * height)
-        let range = max(maxDepth - minDepth, 0.001)
-        
-        for y in 0..<height {
-            for x in 0..<width {
-                let depth = depthData[y * stride + x]
-                let normalized = depth > 0 && depth.isFinite ? (depth - minDepth) / range : 0
-                grayData[y * width + x] = UInt8(max(0, min(255, normalized * 255)))
-            }
-        }
-        
-        // Create CGImage from gray data
-        let colorSpace = CGColorSpaceCreateDeviceGray()
-        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
-        
-        guard let providerRef = CGDataProvider(data: Data(grayData) as CFData),
-              let cgImage = CGImage(width: width,
-                                   height: height,
-                                   bitsPerComponent: 8,
-                                   bitsPerPixel: 8,
-                                   bytesPerRow: width,
-                                   space: colorSpace,
-                                   bitmapInfo: bitmapInfo,
-                                   provider: providerRef,
-                                   decode: nil,
-                                   shouldInterpolate: false,
-                                   intent: .defaultIntent) else {
-            print("   ❌ Failed to create CGImage from depth data")
-            return
-        }
-        
-        let uiImage = UIImage(cgImage: cgImage)
-        
-        // Save to Photos
-        PHPhotoLibrary.requestAuthorization { status in
-            guard status == .authorized else {
-                print("   ❌ Photos permission not granted")
-                return
-            }
-            
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.creationRequestForAsset(from: uiImage)
-            }) { success, error in
-                if success {
-                    print("   ✅ Depth photo #\(self.depthPhotoCounter) saved to Photos (\(width)×\(height))")
-                } else {
-                    print("   ❌ Failed to save depth photo: \(error?.localizedDescription ?? "unknown error")")
-                }
-            }
-        }
-    }
-    
     private func updateMVSDepthTextures(frame: ARFrame) -> Bool {
         guard let promptDA = promptDAEngine else {
             print("⚠️ PromptDA not available, falling back to LiDAR")
             return updateLiDARDepthTextures(frame: frame)
-        }
-        
-        // Log input data
-        let rgbW = CVPixelBufferGetWidth(frame.capturedImage)
-        let rgbH = CVPixelBufferGetHeight(frame.capturedImage)
-        print("\n📍 MVS Mode (PromptDA):")
-        print("   • Input RGB resolution: \(rgbW)×\(rgbH)")
-        
-        if let lidarPrompt = frame.smoothedSceneDepth?.depthMap {
-            let promptW = CVPixelBufferGetWidth(lidarPrompt)
-            let promptH = CVPixelBufferGetHeight(lidarPrompt)
-            print("   • Input LiDAR prompt resolution: \(promptW)×\(promptH)")
-        } else {
-            print("   • No LiDAR prompt available")
         }
         
         do {
@@ -373,54 +250,13 @@ final class Renderer {
             }
             depthTexture = newDepthTexture
             
-            // Generate LoG-based probability samples
-            let depthW = CVPixelBufferGetWidth(output.depthPB)
-            let depthH = CVPixelBufferGetHeight(output.depthPB)
-            let probW = CVPixelBufferGetWidth(output.probPB)
-            let probH = CVPixelBufferGetHeight(output.probPB)
-            
-            print("   • PromptDA output depth: \(depthW)×\(depthH)")
-            print("   • LoG probability map: \(probW)×\(probH)")
-            
-            // Use Bernoulli sampling for intelligent point placement (stochastic sample count)
-            let pixels = ProbabilitySampler.samplePixelsBernoulli(probPB: output.probPB, scale: 2)
-            
-            print("   • Sampled \(pixels.count) points from LoG probability distribution (Bernoulli)")
-            
-            // Convert probability samples from PromptDA resolution to camera resolution
-            // PromptDA outputs at 518×518, but camera is 1920×1440
-            let scaleX = Float(cameraResolution.x) / Float(probW)
-            let scaleY = Float(cameraResolution.y) / Float(probH)
-            print("   • Scaling samples to camera resolution: scaleX=\(String(format: "%.2f", scaleX)), scaleY=\(String(format: "%.2f", scaleY))")
-            
-            cachedProbSamples = pixels.map { pixel in
-                Float2(Float(pixel.x) * scaleX, Float(pixel.y) * scaleY)
-            }
-            
-            print("   • Final sample count for rendering: \(cachedProbSamples?.count ?? 0)")
-            
-            // Use high confidence for PromptDA points (or reuse LiDAR confidence if available)
-            if let confMap = frame.smoothedSceneDepth?.confidenceMap {
-                confidenceTexture = makeTexture(fromPixelBuffer: confMap, pixelFormat: .r8Uint, planeIndex: 0)
-                print("   • Using LiDAR confidence map")
-            } else {
-                // Generate synthetic high confidence map
-                confidenceTexture = makeSyntheticConfidenceTexture(width: depthW, height: depthH)
-                print("   • Using synthetic confidence map (all high confidence)")
-            }
-            
-            // Ensure confidence texture was created
-            if confidenceTexture == nil {
-                print("❌ Failed to create confidence texture")
-                return updateLiDARDepthTextures(frame: frame)
-            }
-            
-            print("✅ PromptDA MVS complete\n")
+            // Always use synthetic high confidence map for PromptDA points
+            confidenceTexture = makeSyntheticConfidenceTexture(width: depthW, height: depthH)
+
             return true
             
         } catch {
             print("❌ PromptDA failed: \(error.localizedDescription), falling back to LiDAR")
-            cachedProbSamples = nil
             return updateLiDARDepthTextures(frame: frame)
         }
     }
@@ -584,8 +420,8 @@ final class Renderer {
         }
         
         // Regenerate grid points buffer if we have new probability samples (MVS mode)
-        if depthSource == .mvs && cachedProbSamples != nil {
-            let newPoints = makeGridPoints()
+        if depthSource == .mvs {
+            let newPoints = makeGridPoints(frame: frame)
             print("   • Regenerating grid points buffer: \(newPoints.count) LoG-sampled points")
             gridPointsBuffer = MetalBuffer<Float2>(device: device,
                                                   array: newPoints,
@@ -624,40 +460,6 @@ extension Renderer {
         return self.cpuParticlesBuffer
     }
 
-    func saveAsPlyFile(fileName: String,
-                       beforeGlobalThread: [() -> Void],
-                       afterGlobalThread: [() -> Void],
-                       errorCallback: (XError) -> Void,
-                       format: String) {
-
-        guard !isSavingFile else {
-            return errorCallback(XError.alreadySavingFile)
-        }
-        guard !cpuParticlesBuffer.isEmpty else {
-            return errorCallback(XError.noScanDone)
-        }
-
-        DispatchQueue.global().async {
-            self.isSavingFile = true
-            DispatchQueue.main.async {
-                for task in beforeGlobalThread { task() }
-            }
-
-            do { self.savedCloudURLs.append(try PLYFile.write(
-                    fileName: fileName,
-                    cpuParticlesBuffer: &self.cpuParticlesBuffer,
-                    highConfCount: self.highConfCount,
-                    format: format)) } catch {
-                self.savingError = XError.savingFailed
-            }
-
-            DispatchQueue.main.async {
-                for task in afterGlobalThread { task() }
-            }
-            self.isSavingFile = false
-        }
-    }
-
     func clearParticles() {
         highConfCount = 0
         currentPointIndex = 0
@@ -674,210 +476,6 @@ extension Renderer {
         particlesBuffer = .init(device: device, count: maxPoints, index: kParticleUniforms.rawValue)
     }
     
-    // Request to save the next depth frame as a photo
-    func saveDepthPhoto() {
-        shouldSaveNextDepth = true
-        print("📸 Depth photo will be saved on next frame")
-    }
-
-    func loadSavedClouds() {
-        let docs = FileManager.default.urls(
-            for: .documentDirectory, in: .userDomainMask)[0]
-        savedCloudURLs = try! FileManager.default.contentsOfDirectory(
-            at: docs, includingPropertiesForKeys: nil, options: .skipsHiddenFiles)
-    }
-
-    // MARK: - Data Extraction for Gaussian Splatting
-    func startDataExtraction() {
-        isDataExtractionEnabled = true
-        frameCounter = 0
-        extractedFrameCounter = 0
-        createDataExtractionDirectories()
-        print("Started data extraction at \(dataExtractionFPS) FPS")
-    }
-
-    func stopDataExtraction() {
-        guard isDataExtractionEnabled else { return }
-        isDataExtractionEnabled = false
-        exportCOLMAPFiles()
-        print("Stopped data extraction. Total frames: \(extractedFrameCounter)")
-    }
-
-    private func createDataExtractionDirectories() {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-
-        // Create folder with timestamp for this scan session
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let timestamp = dateFormatter.string(from: Date())
-        let scanFolderName = "scan_\(timestamp)"
-
-        currentScanFolderName = scanFolderName
-
-        let exportURL = documentsURL.appendingPathComponent(scanFolderName)
-        let imagesURL = exportURL.appendingPathComponent("images")
-        let sparseURL = exportURL.appendingPathComponent("sparse")
-        let sparse0URL = sparseURL.appendingPathComponent("0")
-
-        try? FileManager.default.createDirectory(at: exportURL, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: imagesURL, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: sparse0URL, withIntermediateDirectories: true)
-
-        print("Created scan folder: \(scanFolderName)")
-    }
-
-    private func extractCameraData(frame: ARFrame) {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let exportURL = documentsURL.appendingPathComponent(currentScanFolderName)
-
-        // 1. Save RGB Image
-        saveRGBImage(frame: frame, to: exportURL, frameIndex: extractedFrameCounter)
-
-        // 2. Extract and save camera intrinsics
-        saveCameraIntrinsics(frame: frame, to: exportURL, frameIndex: extractedFrameCounter)
-
-        // 3. Extract and save camera extrinsics (pose)
-        saveCameraExtrinsics(frame: frame, to: exportURL, frameIndex: extractedFrameCounter)
-
-        extractedFrameCounter += 1
-    }
-
-    private func saveRGBImage(frame: ARFrame, to baseURL: URL, frameIndex: Int) {
-        // Convert ARFrame's captured image to JPEG
-        let pixelBuffer = frame.capturedImage
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
-
-        // Convert to RGB color space and create JPEG data
-        if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-           let jpegData = context.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: [:]) {
-
-            let imageURL = baseURL.appendingPathComponent("images").appendingPathComponent(String(format: "%06d.jpg", frameIndex))
-
-            do {
-                try jpegData.write(to: imageURL)
-            } catch {
-                print("Failed to save image \(frameIndex): \(error)")
-            }
-        }
-    }
-
-    private func saveCameraIntrinsics(frame: ARFrame, to baseURL: URL, frameIndex: Int) {
-        let intrinsics = frame.camera.intrinsics
-        let imageResolution = frame.camera.imageResolution
-
-        // Extract intrinsic parameters
-        let fx = intrinsics[0][0]  // Focal length X
-        let fy = intrinsics[1][1]  // Focal length Y
-        let cx = intrinsics[2][0]  // Principal point X
-        let cy = intrinsics[2][1]  // Principal point Y
-
-        // COLMAP cameras.txt format: CAMERA_ID MODEL WIDTH HEIGHT PARAMS[]
-        // Using PINHOLE model: fx fy cx cy
-        let cameraLine = "\(frameIndex) PINHOLE \(Int(imageResolution.width)) \(Int(imageResolution.height)) \(fx) \(fy) \(cx) \(cy)\n"
-
-        let camerasURL = baseURL.appendingPathComponent("sparse/0/cameras.txt")
-
-        // Append to cameras.txt file
-        if let data = cameraLine.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: camerasURL.path) {
-                if let fileHandle = try? FileHandle(forWritingTo: camerasURL) {
-                    fileHandle.seekToEndOfFile()
-                    fileHandle.write(data)
-                    fileHandle.closeFile()
-                }
-            } else {
-                try? data.write(to: camerasURL)
-            }
-        }
-    }
-
-    private func saveCameraExtrinsics(frame: ARFrame, to baseURL: URL, frameIndex: Int) {
-        // Get camera transform (camera-to-world)
-        let cameraToWorld = frame.camera.transform
-
-        // Convert to world-to-camera (what COLMAP expects)
-        let worldToCamera = cameraToWorld.inverse
-
-        // Extract rotation (as quaternion) and translation
-        let rotation = simd_quaternion(worldToCamera)
-        let translation = worldToCamera.columns.3
-
-        // COLMAP images.txt format: 
-        // IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
-        let imageLine = "\(frameIndex) \(rotation.real) \(rotation.imag.x) \(rotation.imag.y) \(rotation.imag.z) \(translation.x) \(translation.y) \(translation.z) \(frameIndex) \(String(format: "%06d.jpg", frameIndex))\n"
-
-        let imagesURL = baseURL.appendingPathComponent("sparse/0/images.txt")
-
-        // Append to images.txt file
-        if let data = imageLine.data(using: .utf8) {
-            if FileManager.default.fileExists(atPath: imagesURL.path) {
-                if let fileHandle = try? FileHandle(forWritingTo: imagesURL) {
-                    fileHandle.seekToEndOfFile()
-                    fileHandle.write(data)
-                    fileHandle.closeFile()
-                }
-            } else {
-                try? data.write(to: imagesURL)
-            }
-        }
-    }
-
-    private func exportCOLMAPFiles() {
-        let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let exportURL = documentsURL.appendingPathComponent(currentScanFolderName)
-
-        // Export actual point cloud data to points3D.txt
-        exportPointCloudData(to: exportURL)
-
-        print("COLMAP data exported to: \(exportURL.path)")
-        print("Total extracted frames: \(extractedFrameCounter)")
-        print("Total point cloud points: \(cpuParticlesBuffer.count)")
-        print("High confidence points: \(highConfCount)")
-        print("Files accessible in iOS Files app under: \(currentScanFolderName)")
-    }
-    
-    private func exportPointCloudData(to baseURL: URL) {
-        let pointsURL = baseURL.appendingPathComponent("sparse/0/points3D.txt")
-        
-        // COLMAP points3D.txt format:
-        // POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID POINT2D_IDX)
-        // We'll use a simplified format with minimal track info
-        
-        var pointsContent = "# 3D point list with one line of data per point:\n"
-        pointsContent += "# POINT3D_ID X Y Z R G B ERROR TRACK[] as (IMAGE_ID POINT2D_IDX)\n"
-        
-        var pointID = 0
-        for particle in cpuParticlesBuffer {
-            // Only export high-confidence points (confidence level 2)
-            if particle.confidence >= 2 {
-                let pos = particle.position
-                let color = particle.color
-                
-                // Convert color from 0-255 float to 0-255 int
-                let red = max(0, min(255, Int(color.x)))
-                let green = max(0, min(255, Int(color.y)))
-                let blue = max(0, min(255, Int(color.z)))
-                
-                // Format: POINT3D_ID X Y Z R G B ERROR TRACK[]
-                // Using error = 1.0 as default, empty track for simplicity
-                let pointLine = "\(pointID) \(pos.x) \(pos.y) \(pos.z) \(red) \(green) \(blue) 1.0\n"
-                pointsContent += pointLine
-                
-                pointID += 1
-            }
-        }
-        
-        // Write to file
-        if let data = pointsContent.data(using: .utf8) {
-            do {
-                try data.write(to: pointsURL)
-                print("Exported \(pointID) high-confidence points to points3D.txt")
-            } catch {
-                print("Failed to write points3D.txt: \(error)")
-            }
-        }
-    }
 }
 
 // MARK: - Metal Renderer Helpers
@@ -931,11 +529,57 @@ private extension Renderer {
     }
 
     /// Makes sample points on camera image, also precompute the anchor point for animation
-    func makeGridPoints() -> [Float2] {
-        // If we have cached probability samples from PromptDA LoG, use them
-        if let cached = cachedProbSamples, !cached.isEmpty {
-            print("📊 Using LoG probability samples: \(cached.count) points")
-            return cached
+    func makeGridPoints(frame: ARFrame? = nil) -> [Float2] {
+        // Custom Bernoulli sampling from probability buffer
+        if let frame = frame, depthSource == .mvs, let promptDA = promptDAEngine {
+            // Create CIImage from captured image
+            let rgb = CIImage(cvPixelBuffer: frame.capturedImage)
+            
+            // Determine target size (use depth texture size if available, else default)
+            var targetSize = CGSize(width: 518, height: 518)
+            if let tex = depthTexture {
+                targetSize = CGSize(width: CVMetalTextureGetTexture(tex)?.width ?? 518, 
+                                  height: CVMetalTextureGetTexture(tex)?.height ?? 518)
+            }
+            
+            do {
+                // Generate probability map on the fly
+                let probPB = try promptDA.makeNewLoGProbability(from: rgb, size: targetSize)
+                
+                CVPixelBufferLockBaseAddress(probPB, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(probPB, .readOnly) }
+                
+                let width = CVPixelBufferGetWidth(probPB)
+                let height = CVPixelBufferGetHeight(probPB)
+                let stride = CVPixelBufferGetBytesPerRow(probPB) / MemoryLayout<Float>.stride
+                
+                guard let ptr = CVPixelBufferGetBaseAddress(probPB)?.assumingMemoryBound(to: Float.self) else {
+                    return []
+                }
+                
+                var points = [Float2]()
+                let scaleX = Float(cameraResolution.x) / Float(width)
+                let scaleY = Float(cameraResolution.y) / Float(height)
+                
+                for y in 0..<height {
+                    let row = y * stride
+                    for x in 0..<width {
+                        let prob = ptr[row + x]
+                        if Float.random(in: 0...1) < prob {
+                            let cx = Float(x) * scaleX
+                            let cy = Float(y) * scaleY
+                            points.append(Float2(cx, cy))
+                        }
+                    }
+                }
+                
+                totalSmartSamplingPoints += points.count
+                print("📊 Sampled \(points.count) points (Total: \(totalSmartSamplingPoints))")
+                return points
+                
+            } catch {
+                print("⚠️ Failed to generate probability map: \(error)")
+            }
         }
         
         // Fallback to uniform hexagonal grid (original behavior for LiDAR)
