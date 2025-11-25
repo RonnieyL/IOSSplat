@@ -377,6 +377,28 @@ private extension CIImage {
         let img = (f.outputImage ?? self).cropped(to: .init(origin:.zero, size:size))
         return img
     }
+    
+    func toPixelBuffer(context: CIContext, pixelFormat: OSType, size: CGSize) -> CVPixelBuffer {
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true
+        ]
+        
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault,
+                                        Int(size.width),
+                                        Int(size.height),
+                                        pixelFormat,
+                                        attrs as CFDictionary,
+                                        &pixelBuffer)
+        
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else {
+            fatalError("Failed to create pixel buffer with status: \(status)")
+        }
+        
+        context.render(self, to: buffer)
+        return buffer
+    }
 }
 
 private extension CVPixelBuffer {

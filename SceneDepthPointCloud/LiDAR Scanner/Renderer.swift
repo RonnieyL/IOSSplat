@@ -125,7 +125,6 @@ final class Renderer {
     
     // PromptDA + LoG sampling support
     private var promptDAEngine: PromptDAEngine?
-    var totalSmartSamplingPoints: Int = 0
     
     // Depth photo saving
     var depthPhotoCounter = 0
@@ -164,7 +163,7 @@ final class Renderer {
         inFlightSemaphore = DispatchSemaphore(value: maxInFlightBuffers)
         
         // Try to initialize PromptDA engine (will be used if depthSource == .mvs)
-        case .mvs:
+        if depthSource == .mvs {
             do {
                 // Use 256×192 prompt size (matches ARKit depth directly, no rotation)
                 promptDAEngine = try PromptDAEngine.create(
@@ -182,6 +181,7 @@ final class Renderer {
                     }
                 }
             }
+        }
         self.loadSavedClouds()
     }
 
@@ -225,9 +225,6 @@ final class Renderer {
             saveDepthAsPhoto(depthMap)
             shouldSaveNextDepth = false
         }
-        
-        // Clear cached probability samples (use uniform grid for LiDAR)
-        cachedProbSamples = nil
 
         return true
     }
@@ -249,6 +246,9 @@ final class Renderer {
                 return updateLiDARDepthTextures(frame: frame)
             }
             depthTexture = newDepthTexture
+
+            let depthW = CVPixelBufferGetWidth(output.depthPB)
+            let depthH = CVPixelBufferGetHeight(output.depthPB)
             
             // Always use synthetic high confidence map for PromptDA points
             confidenceTexture = makeSyntheticConfidenceTexture(width: depthW, height: depthH)
@@ -573,8 +573,7 @@ private extension Renderer {
                     }
                 }
                 
-                totalSmartSamplingPoints += points.count
-                print("📊 Sampled \(points.count) points (Total: \(totalSmartSamplingPoints))")
+                print("📊 Sampled \(points.count) points")
                 return points
                 
             } catch {
