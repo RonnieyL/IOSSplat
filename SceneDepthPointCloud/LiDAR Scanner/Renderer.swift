@@ -163,22 +163,20 @@ final class Renderer {
         inFlightSemaphore = DispatchSemaphore(value: maxInFlightBuffers)
         
         // Try to initialize PromptDA engine (will be used if depthSource == .mvs)
-        if depthSource == .mvs {
-            do {
-                // Use 256×192 prompt size (matches ARKit depth directly, no rotation)
-                promptDAEngine = try PromptDAEngine.create(
-                    bundleModelName: "PromptDA_vits_518x518_prompt256x192",
-                    rgbSize: .init(width: 518, height: 518),
-                    promptHW: (256, 192)
-                )
-            } catch {
-                print("   Error: \(error.localizedDescription)")
-                if let nsError = error as NSError? {
-                    print("   Domain: \(nsError.domain)")
-                    print("   Code: \(nsError.code)")
-                    if let reason = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String {
-                        print("   Reason: \(reason)")
-                    }
+        do {
+            // Use 256×192 prompt size (matches ARKit depth directly, no rotation)
+            promptDAEngine = try PromptDAEngine.create(
+                bundleModelName: "PromptDA_vits_518x518_prompt256x192",
+                rgbSize: .init(width: 518, height: 518),
+                promptHW: (256, 192)
+            )
+        } catch {
+            print("   Error: \(error.localizedDescription)")
+            if let nsError = error as NSError? {
+                print("   Domain: \(nsError.domain)")
+                print("   Code: \(nsError.code)")
+                if let reason = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String {
+                    print("   Reason: \(reason)")
                 }
             }
         }
@@ -251,7 +249,20 @@ final class Renderer {
             let depthH = CVPixelBufferGetHeight(output.depthPB)
             
             // Always use synthetic high confidence map for PromptDA points
-            confidenceTexture = makeSyntheticConfidenceTexture(width: depthW, height: depthH)
+            if let confMap = frame.smoothedSceneDepth?.confidenceMap {
+                confidenceTexture = makeTexture(fromPixelBuffer: confMap, pixelFormat: .r8Uint, planeIndex: 0)
+                print("   • Using LiDAR confidence map")
+            } else {
+                // Generate synthetic high confidence map
+                confidenceTexture = makeSyntheticConfidenceTexture(width: depthW, height: depthH)
+                print("   • Using synthetic confidence map (all high confidence)")
+            }
+            
+            // Ensure confidence texture was created
+            if confidenceTexture == nil {
+                print("❌ Failed to create confidence texture")
+                return updateLiDARDepthTextures(frame: frame)
+            }
 
             return true
             
@@ -347,7 +358,6 @@ final class Renderer {
 
         // render particles
         if self.showParticles {
-            print("   🎨 Rendering \(currentPointCount) particles")
             renderEncoder.setDepthStencilState(depthStencilState)
             renderEncoder.setRenderPipelineState(particlePipelineState)
             renderEncoder.setVertexBuffer(pointCloudUniformsBuffers[currentBufferIndex])
@@ -420,7 +430,7 @@ final class Renderer {
         }
         
         // Regenerate grid points buffer if we have new probability samples (MVS mode)
-        if depthSource == .mvs {
+        if depthSource == .mvs || promptDAEngine != nil {
             let newPoints = makeGridPoints(frame: frame)
             print("   • Regenerating grid points buffer: \(newPoints.count) LoG-sampled points")
             gridPointsBuffer = MetalBuffer<Float2>(device: device,
@@ -531,23 +541,33 @@ private extension Renderer {
     /// Makes sample points on camera image, also precompute the anchor point for animation
     func makeGridPoints(frame: ARFrame? = nil) -> [Float2] {
         // Custom Bernoulli sampling from probability buffer
-        if let frame = frame, depthSource == .mvs, let promptDA = promptDAEngine {
-            // Create CIImage from captured image
-            let rgb = CIImage(cvPixelBuffer: frame.capturedImage)
+        // Use LoG sampling for both MVS and LiDAR modes if promptDA is available
+        if let frame = frame, let promptDA = promptDAEngine {
             
-            // Determine target size (use depth texture size if available, else default)
-            var targetSize = CGSize(width: 518, height: 518)
-            if let tex = depthTexture {
-                targetSize = CGSize(width: CVMetalTextureGetTexture(tex)?.width ?? 518, 
-                                  height: CVMetalTextureGetTexture(tex)?.height ?? 518)
-            }
+            var targetSize = CGSize(width: 1920, height: 1440)
             
             do {
-                // Generate probability map on the fly
-                let probPB = try promptDA.makeNewLoGProbability(from: rgb, size: targetSize)
-                
+                // Generate probability map on the fly - now passing CVPixelBuffer directly
+                let probPB = try promptDA.makeNewLoGProbability(from: frame.capturedImage, size: targetSize)
+
                 CVPixelBufferLockBaseAddress(probPB, .readOnly)
                 defer { CVPixelBufferUnlockBaseAddress(probPB, .readOnly) }
+                
+                // Debug: Check if probability buffer has non-zero values
+                let debugPtr = CVPixelBufferGetBaseAddress(probPB)?.assumingMemoryBound(to: Float.self)
+                if let ptr = debugPtr {
+                    var stats = (min: Float.infinity, max: -Float.infinity, sum: Float(0), nonZero: 0)
+                    let sampleSize = min(1000, CVPixelBufferGetWidth(probPB) * CVPixelBufferGetHeight(probPB))
+                    for i in 0..<sampleSize {
+                        let val = ptr[i]
+                        stats.min = min(stats.min, val)
+                        stats.max = max(stats.max, val)
+                        stats.sum += val
+                        if val > 0.001 { stats.nonZero += 1 }
+                    }
+                    print("      → Probability stats (first \(sampleSize) pixels):")
+                    print("         min=\(stats.min), max=\(stats.max), avg=\(stats.sum/Float(sampleSize)), nonZero=\(stats.nonZero)")
+                }
                 
                 let width = CVPixelBufferGetWidth(probPB)
                 let height = CVPixelBufferGetHeight(probPB)

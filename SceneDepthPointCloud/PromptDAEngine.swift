@@ -309,43 +309,70 @@ final class PromptDAEngine {
         return pixelBuffer
     }
 
-    func makeNewLoGProbability(from rgb: CIImage, size: CGSize) throws -> CVPixelBuffer {
-
-        // Convert to grayscale and resize for running the Laplacian
-        let gray = rgb.toGray().lanczosTo(size)
-
-        // Apply Laplacian filter
-        let lap = gray.clampedToExtent().applyingFilter("CIConvolution3X3", parameters: [
-            "inputWeights": CIVector(values: [
-                0,  1, 0,
-                1, -4, 1,
-                0,  1, 0
-            ], count: 9),
-            "inputBias": 0
-        ]).cropped(to: gray.extent)
-
-        // Zero out edges (keep full resolution, just mask borders to 0)
-        let removalBorder: CGFloat = 2
-        let innerRect = CGRect(x: removalBorder, y: removalBorder, width: size.width - 2 * removalBorder, height: size.height - 2 * removalBorder)
-        let zeroedLap = lap.cropped(to: innerRect).composited(over: CIImage(color: .black).cropped(to: lap.extent))
-
-        // Taking absolute value of the Laplacian response
-        let absLaplacian = zeroedLap.applyingFilter("CIAbsoluteDifference", parameters: [
-            "inputImage2": CIImage(color: .black).cropped(to: zeroedLap.extent)
+    func makeNewLoGProbability(from rgbPB: CVPixelBuffer, size: CGSize) throws -> CVPixelBuffer {
+        
+        // Create CIImage from the YCbCr pixel buffer
+        let ciImage = CIImage(cvPixelBuffer: rgbPB)
+        
+        print("      → Input image extent: \(ciImage.extent)")
+        
+        // Convert to grayscale using luminance
+        let gray = ciImage.toLuma()
+        
+        // Apply edge detection using CIEdges filter
+        let edges = gray.applyingFilter("CIEdges", parameters: [
+            "inputIntensity": 2.0
         ])
-
-        // Apply Gaussian blur to the absolute Laplacian
-        let blurred = absLaplacian.applyingFilter("CIGaussianBlur", parameters: [
-            "inputRadius": 1.0
+        
+        print("      → After CIEdges extent: \(edges.extent)")
+        
+        // Apply Gaussian blur to get broader response around edges
+        let blurred = edges.applyingFilter("CIGaussianBlur", parameters: [
+            "inputRadius": 2.0
         ])
-
-        // Clamping to [0, 1]
-        let clamped = blurred.applyingFilter("CIColorClamp", parameters: [
+        
+        // Zero out edges (2 pixel border on each side)
+        let border: CGFloat = 2
+        let innerRect = CGRect(x: border, 
+                               y: border, 
+                               width: ciImage.extent.width - 2 * border, 
+                               height: ciImage.extent.height - 2 * border)
+        let maskedBlur = blurred.cropped(to: innerRect)
+            .composited(over: CIImage(color: .black).cropped(to: ciImage.extent))
+        
+        // Clamp to [0, 1]
+        let clamped = maskedBlur.applyingFilter("CIColorClamp", parameters: [
             "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
             "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
         ])
-
-        return clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: size)
+        
+        // Convert to pixel buffer
+        let resultPB = clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: ciImage.extent.size)
+        
+        // Debug: Check final statistics
+        CVPixelBufferLockBaseAddress(resultPB, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(resultPB, .readOnly) }
+        
+        if let ptr = CVPixelBufferGetBaseAddress(resultPB)?.assumingMemoryBound(to: Float.self) {
+            var stats = (min: Float.infinity, max: -Float.infinity, sum: Float(0), nonZero: 0)
+            let width = CVPixelBufferGetWidth(resultPB)
+            let height = CVPixelBufferGetHeight(resultPB)
+            let stride = CVPixelBufferGetBytesPerRow(resultPB) / MemoryLayout<Float>.stride
+            let sampleSize = min(1000, width * height)
+            
+            for i in 0..<sampleSize {
+                let y = i / width
+                let x = i % width
+                let val = ptr[y * stride + x]
+                stats.min = min(stats.min, val)
+                stats.max = max(stats.max, val)
+                stats.sum += val
+                if val > 0.001 { stats.nonZero += 1 }
+            }
+            print("      → Edge probability stats: min=\(stats.min), max=\(stats.max), avg=\(stats.sum/Float(sampleSize)), nonZero=\(stats.nonZero)")
+        }
+        
+        return resultPB
     }
     
     
@@ -376,6 +403,28 @@ private extension CIImage {
         f.setValue(sx/sy, forKey:"inputAspectRatio")
         let img = (f.outputImage ?? self).cropped(to: .init(origin:.zero, size:size))
         return img
+    }
+    
+    func bicubicScaleTo(_ size: CGSize) -> CIImage {
+        let scaleX = size.width / extent.width
+        let scaleY = size.height / extent.height
+        
+        // Use bicubic scale transform for precise resizing without aspect ratio constraints
+        let filter = CIFilter(name: "CIBicubicScaleTransform")!
+        filter.setValue(self, forKey: kCIInputImageKey)
+        filter.setValue(scaleX, forKey: "inputScale")
+        filter.setValue(1.0, forKey: "inputAspectRatio")  // No aspect ratio adjustment
+        filter.setValue(0.0, forKey: "inputB")  // Standard bicubic parameters
+        filter.setValue(0.75, forKey: "inputC")
+        
+        // If aspect ratios differ, apply separate Y scaling
+        if abs(scaleX - scaleY) > 0.001 {
+            let intermediate = filter.outputImage!
+            return intermediate.transformed(by: CGAffineTransform(scaleX: 1.0, y: scaleY / scaleX))
+                .cropped(to: CGRect(origin: .zero, size: size))
+        }
+        
+        return (filter.outputImage ?? self).cropped(to: CGRect(origin: .zero, size: size))
     }
     
     func toPixelBuffer(context: CIContext, pixelFormat: OSType, size: CGSize) -> CVPixelBuffer {
