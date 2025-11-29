@@ -320,20 +320,18 @@ final class PromptDAEngine {
         let gray = ciImage.toLuma()
         
         // Apply edge detection using CIEdges filter
-        let edges = gray.applyingFilter("CIEdges", parameters: [
-            "inputIntensity": 2.0
-        ])
+        let edges = convolution3X3(inputImage: gray)!
         
         print("      → After CIEdges extent: \(edges.extent)")
         
         // Apply Gaussian blur to get broader response around edges
         let blurred = edges.applyingFilter("CIGaussianBlur", parameters: [
-            "inputRadius": 2.0
+            "inputRadius": 1.0
         ])
         
         // Zero out edges (2 pixel border on each side)
         let border: CGFloat = 2
-        let innerRect = CGRect(x: border, 
+        let innerRect = CGRect(x: border,   
                                y: border, 
                                width: ciImage.extent.width - 2 * border, 
                                height: ciImage.extent.height - 2 * border)
@@ -448,6 +446,19 @@ private extension CIImage {
         context.render(self, to: buffer)
         return buffer
     }
+}
+
+func convolution3X3(inputImage: CIImage) -> CIImage? {
+    let convolutionFilter = CIFilter.convolution3X3()
+    convolutionFilter.inputImage = inputImage
+    let kernel = CIVector(values: [
+        0, 1, 0,
+        1, -4, 1,
+        0, 1, 0
+    ], count: 9)
+    convolutionFilter.weights = kernel
+    convolutionFilter.bias = 0.0
+    return convolutionFilter.outputImage!
 }
 
 private extension CVPixelBuffer {

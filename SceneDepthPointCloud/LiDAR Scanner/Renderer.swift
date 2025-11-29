@@ -544,9 +544,9 @@ private extension Renderer {
         // Use LoG sampling for both MVS and LiDAR modes if promptDA is available
         if let frame = frame, let promptDA = promptDAEngine {
             
-            var targetSize = CGSize(width: 1920, height: 1440)
+            var targetSize = CGSize(width: 512, height: 512)
             
-            do {
+            do {  
                 // Generate probability map on the fly - now passing CVPixelBuffer directly
                 let probPB = try promptDA.makeNewLoGProbability(from: frame.capturedImage, size: targetSize)
 
