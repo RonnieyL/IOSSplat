@@ -95,6 +95,17 @@ vertex void unprojectVertexMVS(uint vertexID [[vertex_id]],
     particleUniforms[currentPointIndex].confidence = confidence;
 }
 
+vertex RGBVertexOut rgbVertex(uint vertexID [[vertex_id]],
+                              constant RGBUniforms &uniforms [[buffer(0)]]) {
+    const float3 texCoord = float3(viewTexCoords[vertexID], 1) * uniforms.viewToCamera;
+    
+    RGBVertexOut out;
+    out.position = float4(viewVertices[vertexID], 0, 1);
+    out.texCoord = texCoord.xy;
+    
+    return out;
+}
+
 fragment float4 rgbFragment(RGBVertexOut in [[stage_in]],
                             constant RGBUniforms &uniforms [[buffer(0)]],
                             texture2d<float, access::sample> capturedImageTextureY [[texture(kTextureY)]],
