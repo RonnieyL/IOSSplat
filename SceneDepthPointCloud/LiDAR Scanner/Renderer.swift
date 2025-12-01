@@ -9,6 +9,24 @@ import CoreImage
 import Foundation
 import Photos
 
+// MARK: - GPU Sampling Structures
+
+struct SamplingUniforms {
+    var width: UInt32
+    var height: UInt32
+    var stride: UInt32
+    var scaleX: Float
+    var scaleY: Float
+    var maxPoints: UInt32
+}
+
+enum ComputeBufferIndices: Int {
+    case kProbabilityMap = 0
+    case kSampledPoints = 1
+    case kAtomicCounter = 2
+    case kSamplingUniforms = 3
+}
+
 
 // MARK: - Core Metal Scan Renderer
 final class Renderer {
@@ -69,12 +87,18 @@ final class Renderer {
     private lazy var unprojectPipelineState = makeUnprojectionPipelineState()!
     private lazy var rgbPipelineState = makeRGBPipelineState()!
     private lazy var particlePipelineState = makeParticlePipelineState()!
+    private lazy var samplingComputePipelineState = makeSamplingComputePipelineState()!
     // texture cache for captured image
     private lazy var textureCache = makeTextureCache()
     private var capturedImageTextureY: CVMetalTexture?
     private var capturedImageTextureCbCr: CVMetalTexture?
     private var depthTexture: CVMetalTexture?
     private var confidenceTexture: CVMetalTexture?
+    
+    // GPU sampling buffers
+    private var sampledPointsBuffer: MTLBuffer?
+    private var atomicCounterBuffer: MTLBuffer?
+    private var probabilityBuffer: MTLBuffer?
 
     // Multi-buffer rendering pipeline
     private let inFlightSemaphore: DispatchSemaphore
@@ -537,6 +561,15 @@ private extension Renderer {
 
         return try? device.makeRenderPipelineState(descriptor: descriptor)
     }
+    
+    func makeSamplingComputePipelineState() -> MTLComputePipelineState? {
+        guard let kernelFunction = library.makeFunction(name: "bernoulliSample") else {
+            print("⚠️ Failed to create bernoulliSample function")
+            return nil
+        }
+        
+        return try? device.makeComputePipelineState(function: kernelFunction)
+    }
 
     /// Makes sample points on camera image, also precompute the anchor point for animation
     func makeGridPoints(frame: ARFrame? = nil) -> [Float2] {
@@ -577,21 +610,23 @@ private extension Renderer {
                     return []
                 }
                 
-                var points = [Float2]()
                 let scaleX = Float(cameraResolution.x) / Float(width)
                 let scaleY = Float(cameraResolution.y) / Float(height)
                 
-                for y in 0..<height {
-                    let row = y * stride
-                    for x in 0..<width {
-                        let prob = ptr[row + x]
-                        if Float.random(in: 0...1) < prob {
-                            let cx = Float(x) * scaleX
-                            let cy = Float(y) * scaleY
-                            points.append(Float2(cx, cy))
-                        }
-                    }
-                }
+                let samplingStartTime = CFAbsoluteTimeGetCurrent()
+                
+                // GPU-accelerated Bernoulli sampling
+                let points = performGPUSampling(
+                    probabilityData: ptr,
+                    width: width,
+                    height: height,
+                    stride: stride,
+                    scaleX: scaleX,
+                    scaleY: scaleY
+                )
+                
+                let samplingTime = CFAbsoluteTimeGetCurrent() - samplingStartTime
+                print("      → GPU Bernoulli sampling time: \(String(format: "%.3f", samplingTime))s")
                 
                 print("📊 Sampled \(points.count) points")
                 return points
@@ -617,6 +652,92 @@ private extension Renderer {
             }
         }
 
+        return points
+    }
+    
+    /// Perform GPU-accelerated Bernoulli sampling using Metal compute shader
+    func performGPUSampling(probabilityData: UnsafePointer<Float>,
+                           width: Int,
+                           height: Int,
+                           stride: Int,
+                           scaleX: Float,
+                           scaleY: Float) -> [Float2] {
+        
+        let maxPossiblePoints = width * height
+        let dataSize = stride * height * MemoryLayout<Float>.stride
+        
+        // Create or reuse buffers
+        if probabilityBuffer == nil || probabilityBuffer!.length < dataSize {
+            probabilityBuffer = device.makeBuffer(length: dataSize, options: .storageModeShared)
+        }
+        
+        if sampledPointsBuffer == nil || sampledPointsBuffer!.length < maxPossiblePoints * MemoryLayout<Float2>.stride {
+            sampledPointsBuffer = device.makeBuffer(length: maxPossiblePoints * MemoryLayout<Float2>.stride, 
+                                                    options: .storageModeShared)
+        }
+        
+        if atomicCounterBuffer == nil {
+            atomicCounterBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.stride, 
+                                                    options: .storageModeShared)
+        }
+        
+        guard let probBuffer = probabilityBuffer,
+              let pointsBuffer = sampledPointsBuffer,
+              let counterBuffer = atomicCounterBuffer else {
+            print("⚠️ Failed to create Metal buffers for GPU sampling")
+            return []
+        }
+        
+        // Copy probability data to GPU
+        memcpy(probBuffer.contents(), probabilityData, dataSize)
+        
+        // Reset atomic counter to 0
+        counterBuffer.contents().storeBytes(of: UInt32(0), as: UInt32.self)
+        
+        // Setup uniforms
+        var uniforms = SamplingUniforms(
+            width: UInt32(width),
+            height: UInt32(height),
+            stride: UInt32(stride),
+            scaleX: scaleX,
+            scaleY: scaleY,
+            maxPoints: UInt32(maxPossiblePoints)
+        )
+        
+        // Create command buffer and compute encoder
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            print("⚠️ Failed to create command buffer/encoder")
+            return []
+        }
+        
+        computeEncoder.setComputePipelineState(samplingComputePipelineState)
+        computeEncoder.setBuffer(probBuffer, offset: 0, index: ComputeBufferIndices.kProbabilityMap.rawValue)
+        computeEncoder.setBuffer(pointsBuffer, offset: 0, index: ComputeBufferIndices.kSampledPoints.rawValue)
+        computeEncoder.setBuffer(counterBuffer, offset: 0, index: ComputeBufferIndices.kAtomicCounter.rawValue)
+        computeEncoder.setBytes(&uniforms, length: MemoryLayout<SamplingUniforms>.stride, index: ComputeBufferIndices.kSamplingUniforms.rawValue)
+        
+        // Calculate thread groups
+        let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadgroupCount = MTLSize(
+            width: (width + threadgroupSize.width - 1) / threadgroupSize.width,
+            height: (height + threadgroupSize.height - 1) / threadgroupSize.height,
+            depth: 1
+        )
+        
+        computeEncoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
+        computeEncoder.endEncoding()
+        
+        // Execute and wait
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        // Read back results
+        let pointCount = counterBuffer.contents().load(as: UInt32.self)
+        let pointsPointer = pointsBuffer.contents().assumingMemoryBound(to: Float2.self)
+        let points = Array(UnsafeBufferPointer(start: pointsPointer, count: Int(pointCount)))
+        
+        print("📊 GPU sampled \(points.count) points")
         return points
     }
 

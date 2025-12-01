@@ -10,6 +10,7 @@ import CoreML
 import Accelerate
 import AVFoundation
 import Metal
+import CoreImage.CIFilterBuiltins
 
 /// Minimal headless runner for PromptDA + LoG probability
 final class PromptDAEngine {
@@ -311,6 +312,8 @@ final class PromptDAEngine {
 
     func makeNewLoGProbability(from rgbPB: CVPixelBuffer, size: CGSize) throws -> CVPixelBuffer {
         
+        let startTime = CFAbsoluteTimeGetCurrent()
+        
         // Create CIImage from the YCbCr pixel buffer
         let ciImage = CIImage(cvPixelBuffer: rgbPB)
         
@@ -369,6 +372,9 @@ final class PromptDAEngine {
             }
             print("      → Edge probability stats: min=\(stats.min), max=\(stats.max), avg=\(stats.sum/Float(sampleSize)), nonZero=\(stats.nonZero)")
         }
+        
+        let logTime = CFAbsoluteTimeGetCurrent() - startTime
+        print("      → LoG generation time: \(String(format: "%.3f", logTime))s")
         
         return resultPB
     }

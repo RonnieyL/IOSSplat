@@ -5,38 +5,61 @@
 
 #include <simd/simd.h>
 
-enum TextureIndices {
+enum TextureIndices
+{
     kTextureY = 0,
     kTextureCbCr = 1,
     kTextureDepth = 2,
     kTextureConfidence = 3
 };
 
-enum BufferIndices {
+enum BufferIndices
+{
     kPointCloudUniforms = 0,
     kParticleUniforms = 1,
     kGridPoints = 2,
 };
 
-struct RGBUniforms {
+enum ComputeBufferIndices
+{
+    kProbabilityMap = 0,
+    kSampledPoints = 1,
+    kAtomicCounter = 2,
+    kSamplingUniforms = 3,
+};
+
+struct SamplingUniforms
+{
+    unsigned int width;
+    unsigned int height;
+    unsigned int stride;
+    float scaleX;
+    float scaleY;
+    unsigned int maxPoints;
+};
+
+struct RGBUniforms
+{
     matrix_float3x3 viewToCamera;
     float viewRatio;
     float radius;
 };
 
-struct PointCloudUniforms {
+struct PointCloudUniforms
+{
     matrix_float4x4 viewProjectionMatrix;
     matrix_float4x4 localToWorld;
     matrix_float3x3 cameraIntrinsicsInversed;
     simd_float2 cameraResolution;
-    
+
     float particleSize;
     int maxPoints;
     int pointCloudCurrentIndex;
     int confidenceThreshold;
 };
 
-struct ParticleUniforms {
+struct ParticleUniforms
+{
     simd_float3 position;
     simd_float3 color;
     float confidence;

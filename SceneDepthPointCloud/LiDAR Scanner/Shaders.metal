@@ -194,3 +194,58 @@ kernel void smoothLaplacianResponse(
 
     outTexture.write(float4(sum, 0, 0, 0), gid);
 }
+
+// MARK: - GPU Bernoulli Sampling
+
+/// Simple hash function for pseudo-random number generation
+static uint wang_hash(uint seed) {
+    seed = (seed ^ 61) ^ (seed >> 16);
+    seed *= 9;
+    seed = seed ^ (seed >> 4);
+    seed *= 0x27d4eb2d;
+    seed = seed ^ (seed >> 15);
+    return seed;
+}
+
+/// Generate a pseudo-random float in [0, 1) from pixel coordinates and frame counter
+static float random_float(uint x, uint y, uint frameCounter) {
+    uint seed = wang_hash(x + wang_hash(y + wang_hash(frameCounter)));
+    return float(seed) / 4294967296.0; // 2^32
+}
+
+/// GPU-accelerated Bernoulli sampling kernel
+/// Each thread processes one pixel and probabilistically samples it
+kernel void bernoulliSample(constant float *probabilityMap [[buffer(kProbabilityMap)]],
+                            device float2 *sampledPoints [[buffer(kSampledPoints)]],
+                            device atomic_uint *atomicCounter [[buffer(kAtomicCounter)]],
+                            constant SamplingUniforms &uniforms [[buffer(kSamplingUniforms)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    
+    // Boundary check
+    if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
+        return;
+    }
+    
+    // Read probability value
+    uint index = gid.y * uniforms.stride + gid.x;
+    float probability = probabilityMap[index];
+    
+    // Generate random number (use a simple frame counter that changes each call)
+    // Note: We'll pass frame counter via uniforms or use gid as seed
+    float randomValue = random_float(gid.x, gid.y, uniforms.stride); // Using stride as pseudo-frame-counter
+    
+    // Bernoulli test
+    if (randomValue < probability) {
+        // Atomically claim a slot in the output buffer
+        uint outputIndex = atomic_fetch_add_explicit(atomicCounter, 1, memory_order_relaxed);
+        
+        // Check we haven't exceeded max points
+        if (outputIndex < uniforms.maxPoints) {
+            // Convert to camera coordinates
+            float cx = float(gid.x) * uniforms.scaleX;
+            float cy = float(gid.y) * uniforms.scaleY;
+            sampledPoints[outputIndex] = float2(cx, cy);
+        }
+    }
+}
+
