@@ -96,8 +96,9 @@ final class Renderer {
     private var confidenceTexture: CVMetalTexture?
     
     // GPU sampling buffers
-    private var sampledPointsBuffer: MTLBuffer?
-    private var atomicCounterBuffer: MTLBuffer?
+    var sampledPointsBuffer: MTLBuffer?
+    var atomicCounterBuffer: MTLBuffer?
+    var probabilityBuffer: MTLBuffer?
     
     // Gaussian Splatting
     var gaussianSplatting: GaussianSplatting?
@@ -548,16 +549,6 @@ extension Renderer {
             pointCloudUniformsBuffers.append(.init(device: device, count: 1, index: kPointCloudUniforms.rawValue))
         }
         particlesBuffer = .init(device: device, count: maxPoints, index: kParticleUniforms.rawValue)
-    }
-    
-    func loadSplat(url: URL) {
-        if let splat = GaussianSplatLoader.loadPLY(url: url, device: device) {
-            self.gaussianSplatting = splat
-            self.showParticles = false
-            print("Loaded Gaussian Splat from \(url.lastPathComponent)")
-        } else {
-            print("Failed to load Gaussian Splat from \(url.lastPathComponent)")
-        }
     }
 }
 
