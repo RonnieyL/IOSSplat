@@ -11,6 +11,8 @@
 		0D0F84DF2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 0D0F84DE2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage */; };
 		0D0F84E12EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage in Sources */ = {isa = PBXBuildFile; fileRef = 0D0F84E02EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage */; };
 		0D43BE492ED55AF90060CF78 /* ExportLogic.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D43BE482ED55AF90060CF78 /* ExportLogic.swift */; };
+		0DC3CAC42EDEB047001B0F91 /* GaussianSplatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CAC12EDEB047001B0F91 /* GaussianSplatting.swift */; };
+		0DC3CAC52EDEB047001B0F91 /* gsplat_metal.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CAC22EDEB047001B0F91 /* gsplat_metal.metal */; };
 		0DDBAEF92E4A8EEB00074FFE /* MainController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE12E4A8EB400074FFE /* MainController.swift */; };
 		0DDBAEFA2E4A8EEB00074FFE /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE62E4A8EB400074FFE /* Shaders.metal */; };
 		0DDBAEFB2E4A8EEB00074FFE /* XError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE82E4A8EB400074FFE /* XError.swift */; };
@@ -66,6 +68,8 @@
 		0D58E5882E47CE9B007974B4 /* optimizers.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = optimizers.py; sourceTree = "<group>"; };
 		0D58E5892E47CE9B007974B4 /* scene_model.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = scene_model.py; sourceTree = "<group>"; };
 		0D58E58B2E47CE9B007974B4 /* train.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = train.py; sourceTree = "<group>"; };
+		0DC3CAC12EDEB047001B0F91 /* GaussianSplatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GaussianSplatting.swift; sourceTree = "<group>"; };
+		0DC3CAC22EDEB047001B0F91 /* gsplat_metal.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = gsplat_metal.metal; sourceTree = "<group>"; };
 		0DDBAEDE2E4A8EB400074FFE /* CpuParticle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CpuParticle.swift; sourceTree = "<group>"; };
 		0DDBAEDF2E4A8EB400074FFE /* ExportController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportController.swift; sourceTree = "<group>"; };
 		0DDBAEE02E4A8EB400074FFE /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
@@ -173,6 +177,15 @@
 			path = reference;
 			sourceTree = SOURCE_ROOT;
 		};
+		0DC3CAC32EDEB047001B0F91 /* GSplat */ = {
+			isa = PBXGroup;
+			children = (
+				0DC3CAC12EDEB047001B0F91 /* GaussianSplatting.swift */,
+				0DC3CAC22EDEB047001B0F91 /* gsplat_metal.metal */,
+			);
+			path = GSplat;
+			sourceTree = "<group>";
+		};
 		0DDBAEE92E4A8EB400074FFE /* LiDAR Scanner */ = {
 			isa = PBXGroup;
 			children = (
@@ -206,6 +219,7 @@
 		0DDBAEF82E4A8EB400074FFE /* SceneDepthPointCloud */ = {
 			isa = PBXGroup;
 			children = (
+				0DC3CAC32EDEB047001B0F91 /* GSplat */,
 				0D0F84D82EA76B4D00764C00 /* PromptDAEngine.swift */,
 				0DDBAEE92E4A8EB400074FFE /* LiDAR Scanner */,
 				0DDBAEED2E4A8EB400074FFE /* Models */,
@@ -328,6 +342,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				0DDBAF062E4A8F3800074FFE /* SceneDepthPointCloud-Bridging-Header.h in Sources */,
+				0DC3CAC42EDEB047001B0F91 /* GaussianSplatting.swift in Sources */,
+				0DC3CAC52EDEB047001B0F91 /* gsplat_metal.metal in Sources */,
 				0DDBAEF92E4A8EEB00074FFE /* MainController.swift in Sources */,
 				0DDBAEFA2E4A8EEB00074FFE /* Shaders.metal in Sources */,
 				0D43BE492ED55AF90060CF78 /* ExportLogic.swift in Sources */,

@@ -106,10 +106,7 @@ class GaussianSplatting {
         isectIdsBuffer = device.makeBuffer(length: maxIntersects * MemoryLayout<Int64>.stride, options: .storageModePrivate)
         gaussianIdsBuffer = device.makeBuffer(length: maxIntersects * MemoryLayout<Int32>.stride, options: .storageModePrivate)
     }
-    
-    func loadSplat(url: URL) {
-        // ...existing code...
-    }
+
     
     func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>]) {
         guard positions.count == colors.count else { return }
