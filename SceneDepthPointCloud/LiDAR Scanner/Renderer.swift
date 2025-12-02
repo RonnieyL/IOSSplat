@@ -98,8 +98,10 @@ final class Renderer {
     // GPU sampling buffers
     private var sampledPointsBuffer: MTLBuffer?
     private var atomicCounterBuffer: MTLBuffer?
-    private var probabilityBuffer: MTLBuffer?
-
+    
+    // Gaussian Splatting
+    var gaussianSplatting: GaussianSplatting?
+    
     // Multi-buffer rendering pipeline
     private let inFlightSemaphore: DispatchSemaphore
     private var currentBufferIndex = 0
@@ -165,9 +167,12 @@ final class Renderer {
         self.session = session
         self.device = device
         self.renderDestination = renderDestination
-        library = device.makeDefaultLibrary()!
-
-        commandQueue = device.makeCommandQueue()!
+        self.library = device.makeDefaultLibrary()!
+        self.commandQueue = device.makeCommandQueue()!
+        
+        // Initialize Gaussian Splatting
+        self.gaussianSplatting = GaussianSplatting(device: device, commandQueue: commandQueue, library: library)
+        
         // initialize our buffers
         for _ in 0 ..< maxInFlightBuffers {
             rgbUniformsBuffers.append(.init(device: device, count: 1, index: 0))
@@ -380,6 +385,26 @@ final class Renderer {
             renderEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
 
+        // Gaussian Splatting
+        if let splatting = gaussianSplatting {
+            renderEncoder.endEncoding()
+            
+            if let drawable = renderDestination.currentDrawable {
+                let viewMatrix = currentFrame.camera.viewMatrix(for: orientation)
+                let projectionMatrix = currentFrame.camera.projectionMatrix(for: orientation, viewportSize: viewportSize, zNear: 0.001, zFar: 1000)
+                
+                splatting.draw(commandBuffer: commandBuffer, 
+                               viewMatrix: viewMatrix, 
+                               projectionMatrix: projectionMatrix, 
+                               viewportSize: viewportSize, 
+                               outputTexture: drawable.texture)
+            }
+            
+            commandBuffer.present(renderDestination.currentDrawable!)
+            commandBuffer.commit()
+            return
+        }
+
         // render particles
         if self.showParticles {
             renderEncoder.setDepthStencilState(depthStencilState)
@@ -440,6 +465,11 @@ final class Renderer {
             retainingTextures.removeAll()
             // copy gpu point buffer to cpu
             var i = self.cpuParticlesBuffer.count
+            
+            // Temporary arrays for new points
+            var newPoints: [SIMD3<Float>] = []
+            var newColors: [SIMD3<Float>] = []
+            
             while (i < self.maxPoints && self.particlesBuffer[i].position != simd_float3(0.0,0.0,0.0)) {
                 let position = self.particlesBuffer[i].position
                 let color = self.particlesBuffer[i].color
@@ -449,7 +479,17 @@ final class Renderer {
                     CPUParticle(position: position,
                                 color: color,
                                 confidence: confidence))
+                
+                // Collect for Gaussian Splatting
+                newPoints.append(position)
+                newColors.append(color)
+                
                 i += 1
+            }
+            
+            // Add to Gaussian Splatting if active
+            if let splatting = self.gaussianSplatting, !newPoints.isEmpty {
+                splatting.addPoints(positions: newPoints, colors: newColors)
             }
         }
         
@@ -510,6 +550,15 @@ extension Renderer {
         particlesBuffer = .init(device: device, count: maxPoints, index: kParticleUniforms.rawValue)
     }
     
+    func loadSplat(url: URL) {
+        if let splat = GaussianSplatLoader.loadPLY(url: url, device: device) {
+            self.gaussianSplatting = splat
+            self.showParticles = false
+            print("Loaded Gaussian Splat from \(url.lastPathComponent)")
+        } else {
+            print("Failed to load Gaussian Splat from \(url.lastPathComponent)")
+        }
+    }
 }
 
 // MARK: - Metal Renderer Helpers
