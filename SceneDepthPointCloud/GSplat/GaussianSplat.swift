@@ -92,6 +92,12 @@ class GaussianSplatRenderer {
     }
     
     // MARK: - Data Loading
+    func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>]) {
+        let defaultScale = SIMD3<Float>(0.01, 0.01, 0.01)
+        let covariances = Array(repeating: defaultScale, count: positions.count)
+        addPoints(positions: positions, colors: colors, covariances: covariances)
+    }
+
     func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>], covariances: [SIMD3<Float>]) {
         // 1. Append new data to meansBuffer, colorsBuffer
         // 2. Initialize scales (e.g., 0.01), quats (Identity), opacities (1.0)

@@ -101,7 +101,8 @@ final class Renderer {
     var probabilityBuffer: MTLBuffer?
     
     // Gaussian Splatting
-    var gaussianSplatting: GaussianSplatting?
+    private var gaussianSplatRenderer: GaussianSplatRenderer?
+    var isGaussianSplattingEnabled = false
     
     // Multi-buffer rendering pipeline
     private let inFlightSemaphore: DispatchSemaphore
@@ -172,7 +173,7 @@ final class Renderer {
         self.commandQueue = device.makeCommandQueue()!
         
         // Initialize Gaussian Splatting
-        self.gaussianSplatting = GaussianSplatting(device: device, commandQueue: commandQueue, library: library)
+        self.gaussianSplatRenderer = GaussianSplatRenderer(device: device)
         
         // initialize our buffers
         for _ in 0 ..< maxInFlightBuffers {
@@ -387,42 +388,32 @@ final class Renderer {
         }
 
         // Gaussian Splatting
-        if let splatting = gaussianSplatting {
+        if isGaussianSplattingEnabled, let splatting = gaussianSplatRenderer {
             renderEncoder.endEncoding()
             
             if let drawable = renderDestination.currentDrawable {
-                // Pass camera.transform (camera-to-world) so GaussianSplatting can build
-                // the view matrix exactly like OpenSplat does
                 let cameraTransform = currentFrame.camera.transform
                 let projectionMatrix = currentFrame.camera.projectionMatrix(for: orientation, viewportSize: viewportSize, zNear: 0.001, zFar: 1000)
                 
-                // GaussianSplatting manages its own command buffers, so we commit the current one first (without presenting)
-                commandBuffer.commit()
-                
-                // Now let GaussianSplatting do its own rendering with its own command buffers
-                // It will present the drawable when done
-                splatting.draw(cameraTransform: cameraTransform, 
-                               projectionMatrix: projectionMatrix, 
-                               viewportSize: viewportSize, 
-                               outputTexture: drawable.texture,
-                               drawable: drawable)
+                splatting.draw(commandBuffer: commandBuffer,
+                               viewMatrix: cameraTransform.inverse,
+                               projectionMatrix: projectionMatrix,
+                               viewport: viewportSize,
+                               outputTexture: drawable.texture)
             }
-            
-            return
-        }
-
-        // render particles
-        if self.showParticles {
-            renderEncoder.setDepthStencilState(depthStencilState)
-            renderEncoder.setRenderPipelineState(particlePipelineState)
-            renderEncoder.setVertexBuffer(pointCloudUniformsBuffers[currentBufferIndex])
-            renderEncoder.setVertexBuffer(particlesBuffer)
-            renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: currentPointCount)
         } else {
-            print("   ⚠️ Particles rendering disabled (showParticles=false)")
+            // render particles
+            if self.showParticles {
+                renderEncoder.setDepthStencilState(depthStencilState)
+                renderEncoder.setRenderPipelineState(particlePipelineState)
+                renderEncoder.setVertexBuffer(pointCloudUniformsBuffers[currentBufferIndex])
+                renderEncoder.setVertexBuffer(particlesBuffer)
+                renderEncoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: currentPointCount)
+            } else {
+                print("   ⚠️ Particles rendering disabled (showParticles=false)")
+            }
+            renderEncoder.endEncoding()
         }
-
-        renderEncoder.endEncoding()
         commandBuffer.present(renderDestination.currentDrawable!)
         commandBuffer.commit()
     }
@@ -494,7 +485,7 @@ final class Renderer {
             }
             
             // Add to Gaussian Splatting if active
-            if let splatting = self.gaussianSplatting, !newPoints.isEmpty {
+            if self.isGaussianSplattingEnabled, let splatting = self.gaussianSplatRenderer, !newPoints.isEmpty {
                 splatting.addPoints(positions: newPoints, colors: newColors)
             }
         }
