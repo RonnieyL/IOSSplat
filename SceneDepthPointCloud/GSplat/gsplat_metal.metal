@@ -699,10 +699,10 @@ void sh_coeffs_to_color_vjp(
         float v20 = SH_C4[4] * (zz * (35.f * zz - 30.f) + 3.f);
         float v21 = SH_C4[5] * xz * (7.f * zz - 3.f);
         float v22 = SH_C4[6] * (xx - yy) * (7.f * zz - 1.f) *
-                 coeffs[22 * CHANNELS + c];
-        float v23 = SH_C4[7] * xz * (xx - 3.f * yy) * coeffs[23 * CHANNELS + c];
+                 v_coeffs[22 * CHANNELS + c];
+        float v23 = SH_C4[7] * xz * (xx - 3.f * yy) * v_coeffs[23 * CHANNELS + c];
         float v24 = SH_C4[8] * (xx * (xx - 3.f * yy) - yy * (3.f * xx - yy)) *
-                 coeffs[24 * CHANNELS + c];
+                 v_coeffs[24 * CHANNELS + c];
         v_coeffs[16 * CHANNELS + c] = v16 * v_colors[c];
         v_coeffs[17 * CHANNELS + c] = v17 * v_colors[c];
         v_coeffs[18 * CHANNELS + c] = v18 * v_colors[c];

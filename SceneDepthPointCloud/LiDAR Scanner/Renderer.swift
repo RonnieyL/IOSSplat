@@ -102,7 +102,7 @@ final class Renderer {
     
     // Gaussian Splatting
     private var gaussianSplatRenderer: GaussianSplatRenderer?
-    var isGaussianSplattingEnabled = false
+    var isGaussianSplattingEnabled = true  // Enable by default for testing
     
     // Multi-buffer rendering pipeline
     private let inFlightSemaphore: DispatchSemaphore
@@ -389,7 +389,13 @@ final class Renderer {
 
         // Gaussian Splatting
         if isGaussianSplattingEnabled, let splatting = gaussianSplatRenderer {
+            // Check if we have Gaussian splats to render
+            // For now, always use the Gaussian path when enabled
+            // The GaussianSplatRenderer will handle the case of no points gracefully
             renderEncoder.endEncoding()
+            
+            let splatPointCount = splatting.getPointCount()
+            print("[Renderer] GaussianSplatRenderer has \(splatPointCount) points before draw()")
             
             if let drawable = renderDestination.currentDrawable {
                 let cameraTransform = currentFrame.camera.transform
@@ -401,8 +407,11 @@ final class Renderer {
                                viewport: viewportSize,
                                outputTexture: drawable.texture)
             }
+            
+            commandBuffer.present(renderDestination.currentDrawable!)
+            commandBuffer.commit()
         } else {
-            // render particles
+            // render particles (fallback when Gaussian Splatting disabled)
             if self.showParticles {
                 renderEncoder.setDepthStencilState(depthStencilState)
                 renderEncoder.setRenderPipelineState(particlePipelineState)
@@ -413,9 +422,10 @@ final class Renderer {
                 print("   ⚠️ Particles rendering disabled (showParticles=false)")
             }
             renderEncoder.endEncoding()
+            
+            commandBuffer.present(renderDestination.currentDrawable!)
+            commandBuffer.commit()
         }
-        commandBuffer.present(renderDestination.currentDrawable!)
-        commandBuffer.commit()
     }
 
     private func shouldProcessLiDARThisFrame(_ frame: ARFrame) -> Bool {
@@ -457,6 +467,9 @@ final class Renderer {
         pointCloudUniforms.pointCloudCurrentIndex = Int32(currentPointIndex)
 
         var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr, depthTexture, confidenceTexture]
+        
+        // Capture camera position for use in the completion handler
+        let cameraPosition = frame.camera.transform.columns.3
 
         commandBuffer.addCompletedHandler { buffer in
             retainingTextures.removeAll()
@@ -466,6 +479,7 @@ final class Renderer {
             // Temporary arrays for new points
             var newPoints: [SIMD3<Float>] = []
             var newColors: [SIMD3<Float>] = []
+            var newCovariances: [SIMD3<Float>] = []
             
             while (i < self.maxPoints && self.particlesBuffer[i].position != simd_float3(0.0,0.0,0.0)) {
                 let position = self.particlesBuffer[i].position
@@ -481,12 +495,28 @@ final class Renderer {
                 newPoints.append(position)
                 newColors.append(color)
                 
+                // Compute depth-based scale for Gaussian covariance
+                // Points further away get larger splats to maintain visual coverage
+                let dx = position.x - cameraPosition.x
+                let dy = position.y - cameraPosition.y
+                let dz = position.z - cameraPosition.z
+                let depth = sqrt(dx*dx + dy*dy + dz*dz)
+                
+                // Base scale proportional to depth (roughly 1cm at 1m distance)
+                // Adjust confidence: high confidence = smaller splats, low = larger
+                let confidenceFactor: Float = confidence == 2 ? 1.0 : (confidence == 1 ? 1.5 : 2.0)
+                let baseScale: Float = 0.005 * depth * confidenceFactor // 0.5% of depth
+                let scale = SIMD3<Float>(baseScale, baseScale, baseScale)
+                newCovariances.append(scale)
+                
                 i += 1
             }
             
             // Add to Gaussian Splatting if active
+            print("[Renderer] Completion handler: collected \(newPoints.count) new points, isGaussianSplattingEnabled=\(self.isGaussianSplattingEnabled), splatRenderer exists=\(self.gaussianSplatRenderer != nil)")
             if self.isGaussianSplattingEnabled, let splatting = self.gaussianSplatRenderer, !newPoints.isEmpty {
-                splatting.addPoints(positions: newPoints, colors: newColors)
+                print("[Renderer] Calling addPoints with \(newPoints.count) points")
+                splatting.addPoints(positions: newPoints, colors: newColors, covariances: newCovariances)
             }
         }
         

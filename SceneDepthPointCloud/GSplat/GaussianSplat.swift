@@ -2,6 +2,9 @@ import Metal
 import MetalKit
 
 class GaussianSplatRenderer {
+    // MARK: - Device
+    private let device: MTLDevice
+    
     // MARK: - Pipeline States
     private var projectPipeline: MTLComputePipelineState!
     private var mapIntersectsPipeline: MTLComputePipelineState!
@@ -34,6 +37,14 @@ class GaussianSplatRenderer {
     private var numTilesHitBuffer: MTLBuffer! // Used for Counts -> then Offsets
     private var imgBuffer: MTLBuffer! // Intermediate image buffer
     
+    // Rasterization scratch buffers
+    private var finalTsBuffer: MTLBuffer!
+    private var finalIndexBuffer: MTLBuffer!
+    
+    // Intermediate texture for compute output (drawable textures are frameBufferOnly)
+    private var intermediateTexture: MTLTexture?
+    private var copyPipeline: MTLRenderPipelineState?
+    
     // Sorting Data
     private var isectIdsBuffer: MTLBuffer!    // (TileID << 32) | Depth
     private var gaussianIdsBuffer: MTLBuffer! // Splat Index
@@ -41,6 +52,8 @@ class GaussianSplatRenderer {
     
     // MARK: - Initialization
     init(device: MTLDevice) {
+        self.device = device
+        
         // 1. Load Library
         // 2. Create Pipeline States for all kernels
         // 3. Allocate initial buffers (can resize dynamically)
@@ -54,6 +67,13 @@ class GaussianSplatRenderer {
                 rasterizePipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "nd_rasterize_forward_kernel")!)
                 displayPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "display_kernel")!)
                 clearBufferPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "clear_buffer_kernel")!)
+                
+                // Create render pipeline for copying intermediate texture to drawable
+                let copyPipelineDescriptor = MTLRenderPipelineDescriptor()
+                copyPipelineDescriptor.vertexFunction = library.makeFunction(name: "copyVertex")
+                copyPipelineDescriptor.fragmentFunction = library.makeFunction(name: "copyFragment")
+                copyPipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+                copyPipeline = try? device.makeRenderPipelineState(descriptor: copyPipelineDescriptor)
                 
                 // Initialize Helper Classes
                 prefixSum = PrefixSum(device: device)
@@ -89,6 +109,10 @@ class GaussianSplatRenderer {
                 // Image buffer (assuming max 4K resolution for now, resize in draw if needed)
                 let maxPixels = 3840 * 2160
                 imgBuffer = device.makeBuffer(length: maxPixels * 3 * MemoryLayout<Float>.stride, options: .storageModePrivate)
+                
+                // Rasterization scratch buffers
+                finalTsBuffer = device.makeBuffer(length: maxPixels * MemoryLayout<Float>.stride, options: .storageModePrivate)
+                finalIndexBuffer = device.makeBuffer(length: maxPixels * MemoryLayout<Int32>.stride, options: .storageModePrivate)
     }
     
     // MARK: - Data Loading
@@ -103,20 +127,36 @@ class GaussianSplatRenderer {
         // 2. Initialize scales (e.g., 0.01), quats (Identity), opacities (1.0)
         // 3. Resize intermediate buffers if maxPoints exceeded
         guard positions.count == colors.count && positions.count == covariances.count else {
-            print("Error: positions, colors, and covariances arrays must have the same count")
+            print("[GaussianSplatRenderer] Error: positions, colors, and covariances arrays must have the same count")
             return
         }
         
         let newPointCount = positions.count
-        guard newPointCount > 0 else { return }
+        guard newPointCount > 0 else { 
+            print("[GaussianSplatRenderer] addPoints called with 0 points")
+            return 
+        }
+        
+        print("[GaussianSplatRenderer] addPoints called with \(newPointCount) points (current total: \(pointCount))")
         
         // Get current point count from buffer capacity
         let currentCapacity = meansBuffer.length / MemoryLayout<SIMD3<Float>>.stride
         let device = meansBuffer.device
         
+        // Calculate new total point count
+        let totalPointCount = pointCount + newPointCount
+        
         // Resize buffers if needed
-        if newPointCount > currentCapacity {
-            let newCapacity = max(newPointCount, currentCapacity * 2)
+        if totalPointCount > currentCapacity {
+            let newCapacity = max(totalPointCount, currentCapacity * 2)
+            print("[GaussianSplatRenderer] Resizing buffers from \(currentCapacity) to \(newCapacity)")
+            
+            // Save old buffers to copy data
+            let oldMeansBuffer = meansBuffer
+            let oldScalesBuffer = scalesBuffer
+            let oldQuatsBuffer = quatsBuffer
+            let oldOpacitiesBuffer = opacitiesBuffer
+            let oldColorsBuffer = colorsBuffer
             
             // Reallocate Gaussian data buffers
             meansBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
@@ -124,6 +164,16 @@ class GaussianSplatRenderer {
             quatsBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD4<Float>>.stride, options: .storageModeShared)
             opacitiesBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<Float>.stride, options: .storageModeShared)
             colorsBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
+            
+            // Copy existing data
+            if pointCount > 0, let oldMeans = oldMeansBuffer, let oldScales = oldScalesBuffer,
+               let oldQuats = oldQuatsBuffer, let oldOpacities = oldOpacitiesBuffer, let oldColors = oldColorsBuffer {
+                memcpy(meansBuffer.contents(), oldMeans.contents(), pointCount * MemoryLayout<SIMD3<Float>>.stride)
+                memcpy(scalesBuffer.contents(), oldScales.contents(), pointCount * MemoryLayout<SIMD3<Float>>.stride)
+                memcpy(quatsBuffer.contents(), oldQuats.contents(), pointCount * MemoryLayout<SIMD4<Float>>.stride)
+                memcpy(opacitiesBuffer.contents(), oldOpacities.contents(), pointCount * MemoryLayout<Float>.stride)
+                memcpy(colorsBuffer.contents(), oldColors.contents(), pointCount * MemoryLayout<SIMD3<Float>>.stride)
+            }
             
             // Reallocate intermediate buffers
             cov3dBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride * 2, options: .storageModePrivate)
@@ -143,37 +193,52 @@ class GaussianSplatRenderer {
             gaussianIdsBuffer = device.makeBuffer(length: potIntersectCapacity * MemoryLayout<Int32>.stride, options: .storageModePrivate)
         }
         
-        // Copy position data
-        let meansPointer = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: newPointCount)
+        // Append new position data (starting from current pointCount)
+        let meansPointer = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: totalPointCount)
         for i in 0..<newPointCount {
-            meansPointer[i] = positions[i]
+            meansPointer[pointCount + i] = positions[i]
         }
         
-        // Copy color data
-        let colorsPointer = colorsBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: newPointCount)
+        // Append new color data
+        let colorsPointer = colorsBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: totalPointCount)
         for i in 0..<newPointCount {
-            colorsPointer[i] = colors[i]
+            colorsPointer[pointCount + i] = colors[i]
         }
         
-        // Copy covariance data (assuming this represents scale components) might change this to taking an input of the probability and 
-        let scalesPointer = scalesBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: newPointCount)
+        // Append covariance data (scale components)
+        let scalesPointer = scalesBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: totalPointCount)
         for i in 0..<newPointCount {
-            scalesPointer[i] = covariances[i]
+            scalesPointer[pointCount + i] = covariances[i]
         }
         
         // Initialize quaternions to identity rotation
-        let quatsPointer = quatsBuffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: newPointCount)
+        let quatsPointer = quatsBuffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: totalPointCount)
         for i in 0..<newPointCount {
-            quatsPointer[i] = SIMD4<Float>(0, 0, 0, 1) // Identity quaternion (x, y, z, w)
+            quatsPointer[pointCount + i] = SIMD4<Float>(0, 0, 0, 1) // Identity quaternion (x, y, z, w)
         }
         
         // Initialize opacities to fully opaque
-        let opacitiesPointer = opacitiesBuffer.contents().bindMemory(to: Float.self, capacity: newPointCount)
+        let opacitiesPointer = opacitiesBuffer.contents().bindMemory(to: Float.self, capacity: totalPointCount)
         for i in 0..<newPointCount {
-            opacitiesPointer[i] = 1.0
+            opacitiesPointer[pointCount + i] = 1.0
         }
         
-        self.pointCount = newPointCount
+        // Update total point count
+        self.pointCount = totalPointCount
+        print("[GaussianSplatRenderer] Total points now: \(pointCount)")
+    }
+    
+    // MARK: - Public Accessors
+    
+    /// Returns the current number of Gaussian splats
+    func getPointCount() -> Int {
+        return pointCount
+    }
+    
+    /// Clears all points
+    func clearPoints() {
+        pointCount = 0
+        print("[GaussianSplatRenderer] Cleared all points")
     }
     
     
@@ -183,6 +248,15 @@ class GaussianSplatRenderer {
               projectionMatrix: matrix_float4x4, 
               viewport: CGSize, 
               outputTexture: MTLTexture) {
+        
+        // Skip rendering if no points
+        guard pointCount > 0 else {
+            // Only print occasionally to avoid spam
+            print("[GaussianSplatRenderer] No points to render")
+            return
+        }
+        
+        print("[GaussianSplatRenderer] Drawing \(pointCount) splats, viewport: \(viewport)")
         
         // 1. Projection Pass
         // ------------------
@@ -220,14 +294,14 @@ class GaussianSplatRenderer {
         // Sorts the splats by TileID (primary) and Depth (secondary).
         // Kernel: Bitonic Sort (multiple dispatches)
         // Sorts: isectIdsBuffer and gaussianIdsBuffer in place
-        dispatchSort(commandBuffer: commandBuffer, ...)
+        dispatchSort(commandBuffer: commandBuffer)
         
         // 5. Tile Range Pass
         // ------------------
         // Identifies the start and end indices for each tile in the sorted list.
         // Kernel: get_tile_bin_edges_kernel
         // Writes to: tileBinsBuffer
-        dispatchTileBinning(commandBuffer: commandBuffer, ...)
+        dispatchTileBinning(commandBuffer: commandBuffer)
         
         // 6. Rasterization Pass
         // ---------------------
@@ -374,22 +448,60 @@ class GaussianSplatRenderer {
         encoder.endEncoding()
     }
     
+    // Ensure intermediate texture exists and matches size
+    private func ensureIntermediateTexture(width: Int, height: Int) {
+        if intermediateTexture == nil || 
+           intermediateTexture!.width != width || 
+           intermediateTexture!.height != height {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            descriptor.usage = [.shaderRead, .shaderWrite]
+            descriptor.storageMode = .private
+            intermediateTexture = device.makeTexture(descriptor: descriptor)
+        }
+    }
+    
     private func dispatchDisplay(commandBuffer: MTLCommandBuffer, texture: MTLTexture) {
+        // Ensure we have an intermediate texture of the right size
+        ensureIntermediateTexture(width: texture.width, height: texture.height)
+        
+        guard let intermediateTex = intermediateTexture else { return }
+        
+        // First, write to the intermediate texture (which supports compute writes)
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         encoder.label = "Display Pass"
         encoder.setComputePipelineState(displayPipeline)
         
         encoder.setBuffer(imgBuffer, offset: 0, index: 0)
-        encoder.setTexture(texture, index: 0)
+        encoder.setTexture(intermediateTex, index: 0)
         
         var imgSize = SIMD2<UInt32>(UInt32(texture.width), UInt32(texture.height))
         encoder.setBytes(&imgSize, length: MemoryLayout<SIMD2<UInt32>>.size, index: 1)
         
         let gridSize = MTLSize(width: texture.width, height: texture.height, depth: 1)
-        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1) // Standard 2D block
+        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
         
         encoder.endEncoding()
+        
+        // Now copy from intermediate texture to drawable using a render pass
+        let renderPassDescriptor = MTLRenderPassDescriptor()
+        renderPassDescriptor.colorAttachments[0].texture = texture
+        renderPassDescriptor.colorAttachments[0].loadAction = .dontCare
+        renderPassDescriptor.colorAttachments[0].storeAction = .store
+        
+        guard let copyPipeline = copyPipeline,
+              let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
+        
+        renderEncoder.label = "Copy to Drawable"
+        renderEncoder.setRenderPipelineState(copyPipeline)
+        renderEncoder.setFragmentTexture(intermediateTex, index: 0)
+        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        renderEncoder.endEncoding()
     }
 
     private func dispatchRasterization(commandBuffer: MTLCommandBuffer, viewport: CGSize) {
@@ -413,22 +525,14 @@ class GaussianSplatRenderer {
         encoder.setBuffer(colorsBuffer, offset: 0, index: 7)
         encoder.setBuffer(opacitiesBuffer, offset: 0, index: 8)
         
-        // These are optional/debug outputs in the kernel signature, can be nil or dummy buffers if not used
-        // But Metal requires binding if they are in the argument table.
-        // Let's create small dummy buffers for now or reuse existing scratch if safe.
-        // Actually, looking at kernel: device float* final_Ts, device int* final_index
-        // We should allocate them.
-        let pixelCount = Int(viewport.width * viewport.height)
-        let finalTsBuffer = device.makeBuffer(length: pixelCount * MemoryLayout<Float>.stride, options: .storageModePrivate)
-        let finalIndexBuffer = device.makeBuffer(length: pixelCount * MemoryLayout<Int32>.stride, options: .storageModePrivate)
-        
+        // Use pre-allocated scratch buffers for final_Ts and final_index
         encoder.setBuffer(finalTsBuffer, offset: 0, index: 9)
         encoder.setBuffer(finalIndexBuffer, offset: 0, index: 10)
         encoder.setBuffer(imgBuffer, offset: 0, index: 11)
         encoder.setBytes(&background, length: MemoryLayout<SIMD3<Float>>.size, index: 12)
         
-        // Threadgroup config
-        let blockDim = SIMD2<UInt32>(16, 16)
+        // Threadgroup config - use var so we can pass by reference
+        var blockDim = SIMD2<UInt32>(16, 16)
         encoder.setBytes(&blockDim, length: MemoryLayout<SIMD2<UInt32>>.size, index: 13)
         
         let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
