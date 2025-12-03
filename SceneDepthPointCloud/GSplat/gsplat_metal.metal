@@ -2,6 +2,36 @@
 
 using namespace metal;
 
+// ============================================================================
+// MARK: - Fullscreen Copy Shaders (for frameBufferOnly texture workaround)
+// ============================================================================
+
+struct CopyVertexOut {
+    float4 position [[position]];
+    float2 texCoord;
+};
+
+vertex CopyVertexOut copyVertex(uint vertexID [[vertex_id]]) {
+    // Fullscreen triangle (3 vertices cover entire screen)
+    float2 positions[3] = { float2(-1, -1), float2(3, -1), float2(-1, 3) };
+    float2 texCoords[3] = { float2(0, 1), float2(2, 1), float2(0, -1) };
+    
+    CopyVertexOut out;
+    out.position = float4(positions[vertexID], 0.0, 1.0);
+    out.texCoord = texCoords[vertexID];
+    return out;
+}
+
+fragment float4 copyFragment(CopyVertexOut in [[stage_in]],
+                             texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler s(filter::linear);
+    return tex.sample(s, in.texCoord);
+}
+
+// ============================================================================
+// MARK: - Gaussian Splatting Kernels
+// ============================================================================
+
 #define BLOCK_X 16
 #define BLOCK_Y 16
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)

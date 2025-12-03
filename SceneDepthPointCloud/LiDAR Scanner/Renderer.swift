@@ -391,18 +391,23 @@ final class Renderer {
             renderEncoder.endEncoding()
             
             if let drawable = renderDestination.currentDrawable {
-                let viewMatrix = currentFrame.camera.viewMatrix(for: orientation)
+                // Pass camera.transform (camera-to-world) so GaussianSplatting can build
+                // the view matrix exactly like OpenSplat does
+                let cameraTransform = currentFrame.camera.transform
                 let projectionMatrix = currentFrame.camera.projectionMatrix(for: orientation, viewportSize: viewportSize, zNear: 0.001, zFar: 1000)
                 
-                splatting.draw(commandBuffer: commandBuffer, 
-                               viewMatrix: viewMatrix, 
+                // GaussianSplatting manages its own command buffers, so we commit the current one first (without presenting)
+                commandBuffer.commit()
+                
+                // Now let GaussianSplatting do its own rendering with its own command buffers
+                // It will present the drawable when done
+                splatting.draw(cameraTransform: cameraTransform, 
                                projectionMatrix: projectionMatrix, 
                                viewportSize: viewportSize, 
-                               outputTexture: drawable.texture)
+                               outputTexture: drawable.texture,
+                               drawable: drawable)
             }
             
-            commandBuffer.present(renderDestination.currentDrawable!)
-            commandBuffer.commit()
             return
         }
 
