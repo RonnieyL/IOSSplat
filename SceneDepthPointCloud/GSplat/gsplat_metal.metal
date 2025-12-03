@@ -698,9 +698,11 @@ void sh_coeffs_to_color_vjp(
         float v19 = SH_C4[3] * yz * (7.f * zz - 3.f);
         float v20 = SH_C4[4] * (zz * (35.f * zz - 30.f) + 3.f);
         float v21 = SH_C4[5] * xz * (7.f * zz - 3.f);
-        float v22 = SH_C4[6] * (xx - yy) * (7.f * zz - 1.f);
-        float v23 = SH_C4[7] * xz * (xx - 3.f * yy);
-        float v24 = SH_C4[8] * (xx * (xx - 3.f * yy) - yy * (3.f * xx - yy));
+        float v22 = SH_C4[6] * (xx - yy) * (7.f * zz - 1.f) *
+                 coeffs[22 * CHANNELS + c];
+        float v23 = SH_C4[7] * xz * (xx - 3.f * yy) * coeffs[23 * CHANNELS + c];
+        float v24 = SH_C4[8] * (xx * (xx - 3.f * yy) - yy * (3.f * xx - yy)) *
+                 coeffs[24 * CHANNELS + c];
         v_coeffs[16 * CHANNELS + c] = v16 * v_colors[c];
         v_coeffs[17 * CHANNELS + c] = v17 * v_colors[c];
         v_coeffs[18 * CHANNELS + c] = v18 * v_colors[c];
@@ -804,7 +806,7 @@ kernel void map_gaussian_to_intersects_kernel(
 kernel void get_tile_bin_edges_kernel(
     constant int& num_intersects, 
     constant int64_t* isect_ids_sorted, 
-    device int* tile_bins, // int2
+    device int* tile_bins,
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= num_intersects)
@@ -1488,18 +1490,26 @@ kernel void combine_keys_kernel(
     keys[id] = (high << 32) | (low & 0xFFFFFFFF);
 }
 
-kernel void display_texture_kernel(
-    const device float* img_buffer [[buffer(0)]],
+kernel void clear_buffer_kernel(
+    device int* buffer [[buffer(0)]],
+    constant int& value [[buffer(1)]],
+    uint id [[thread_position_in_grid]]
+) {
+    buffer[id] = value;
+}
+
+kernel void display_kernel(
+    device float* img_buffer [[buffer(0)]],
     texture2d<float, access::write> out_texture [[texture(0)]],
+    constant uint2& img_size [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    if (gid.x >= out_texture.get_width() || gid.y >= out_texture.get_height()) return;
+    if (gid.x >= img_size.x || gid.y >= img_size.y) return;
     
-    uint width = out_texture.get_width();
-    uint idx = gid.y * width + gid.x;
-    
+    uint idx = gid.y * img_size.x + gid.x;
+    // Assuming 3 channels (RGB) in img_buffer
     float r = img_buffer[idx * 3 + 0];
-    float g = img_buffer[idx * 3 + 1];
+    float g = img_buffer[idx * 3 +  1];
     float b = img_buffer[idx * 3 + 2];
     
     out_texture.write(float4(r, g, b, 1.0), gid);
