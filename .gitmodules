@@ -1,3 +1,6 @@
 [submodule "OpenSplat"]
 	path = OpenSplat
 	url = https://github.com/pierotofy/OpenSplat.git
+[submodule "MetalSplatter"]
+	path = MetalSplatter
+	url = https://github.com/scier/MetalSplatter.git

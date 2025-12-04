@@ -1,544 +1,814 @@
+import Foundation
 import Metal
 import MetalKit
+import os
 
-class GaussianSplatRenderer {
-    // MARK: - Device
-    private let device: MTLDevice
-    
-    // MARK: - Pipeline States
-    private var projectPipeline: MTLComputePipelineState!
-    private var mapIntersectsPipeline: MTLComputePipelineState!
-    private var sortPipeline: MTLComputePipelineState! // Bitonic or Radix
-    private var tileBinPipeline: MTLComputePipelineState!
-    private var rasterizePipeline: MTLComputePipelineState!
-    private var displayPipeline: MTLComputePipelineState!
-    private var clearBufferPipeline: MTLComputePipelineState!
-    
-    // Helper Classes
-    private var prefixSum: PrefixSum!
-    private var bitonicSort: BitonicSort!
-    
-    private var pointCount: Int = 0
-    
-    // MARK: - Buffers
-    // Gaussian Data (Persistent)
-    var meansBuffer: MTLBuffer!      // 3D Positions
-    var scalesBuffer: MTLBuffer!     // 3D Scales
-    var quatsBuffer: MTLBuffer!      // Rotations
-    var opacitiesBuffer: MTLBuffer!  // Alpha
-    var colorsBuffer: MTLBuffer!     // SH Coeffs or RGB
-    
-    // Intermediate Data (Per Frame)
-    private var cov3dBuffer: MTLBuffer!
-    private var xysBuffer: MTLBuffer!
-    private var depthsBuffer: MTLBuffer!
-    private var radiiBuffer: MTLBuffer!
-    private var conicsBuffer: MTLBuffer!
-    private var numTilesHitBuffer: MTLBuffer! // Used for Counts -> then Offsets
-    private var imgBuffer: MTLBuffer! // Intermediate image buffer
-    
-    // Rasterization scratch buffers
-    private var finalTsBuffer: MTLBuffer!
-    private var finalIndexBuffer: MTLBuffer!
-    
-    // Intermediate texture for compute output (drawable textures are frameBufferOnly)
-    private var intermediateTexture: MTLTexture?
-    private var copyPipeline: MTLRenderPipelineState?
-    
-    // Sorting Data
-    private var isectIdsBuffer: MTLBuffer!    // (TileID << 32) | Depth
-    private var gaussianIdsBuffer: MTLBuffer! // Splat Index
-    private var tileBinsBuffer: MTLBuffer!    // [Start, End] per tile
-    
-    // MARK: - Initialization
-    init(device: MTLDevice) {
+#if arch(x86_64)
+typealias Float16 = Float
+#warning("x86_64 targets are unsupported by MetalSplatter and will fail at runtime. MetalSplatter builds on x86_64 only because Xcode builds Swift Packages as universal binaries and provides no way to override this. When Swift supports Float16 on x86_64, this may be revisited.")
+#endif
+
+public class SplatRenderer {
+    enum Constants {
+        // Keep in sync with Shaders.metal : maxViewCount
+        static let maxViewCount = 2
+        // Sort by euclidian distance squared from camera position (true), or along the "forward" vector (false)
+        // TODO: compare the behaviour and performance of sortByDistance
+        // notes: sortByDistance introduces unstable artifacts when you get close to an object; whereas !sortByDistance introduces artifacts are you turn -- but they're a little subtler maybe?
+        static let sortByDistance = true
+        // Only store indices for 1024 splats; for the remainder, use instancing of these existing indices.
+        // Setting to 1 uses only instancing (with a significant performance penalty); setting to a number higher than the splat count
+        // uses only indexing (with a significant memory penalty for th elarge index array, and a small performance penalty
+        // because that can't be cached as easiliy). Anywhere within an order of magnitude (or more?) of 1k seems to be the sweet spot,
+        // with effectively no memory penalty compated to instancing, and slightly better performance than even using all indexing.
+        static let maxIndexedSplatCount = 1024
+
+        static let tileSize = MTLSize(width: 32, height: 32, depth: 1)
+    }
+
+    private static let log =
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "GaussianSplat",
+               category: "SplatRenderer")
+
+    public struct ViewportDescriptor {
+        public var viewport: MTLViewport
+        public var projectionMatrix: simd_float4x4
+        public var viewMatrix: simd_float4x4
+        public var screenSize: SIMD2<Int>
+
+        public init(viewport: MTLViewport, projectionMatrix: simd_float4x4, viewMatrix: simd_float4x4, screenSize: SIMD2<Int>) {
+            self.viewport = viewport
+            self.projectionMatrix = projectionMatrix
+            self.viewMatrix = viewMatrix
+            self.screenSize = screenSize
+        }
+    }
+
+    // Keep in sync with Shaders.metal : BufferIndex
+    enum BufferIndex: NSInteger {
+        case uniforms = 0
+        case splat    = 1
+    }
+
+    // Keep in sync with Shaders.metal : Uniforms
+    struct Uniforms {
+        var projectionMatrix: matrix_float4x4
+        var viewMatrix: matrix_float4x4
+        var screenSize: SIMD2<UInt32> // Size of screen in pixels
+
+        var splatCount: UInt32
+        var indexedSplatCount: UInt32
+    }
+
+    // Keep in sync with Shaders.metal : UniformsArray
+    struct UniformsArray {
+        // maxViewCount = 2, so we have 2 entries
+        var uniforms0: Uniforms
+        var uniforms1: Uniforms
+
+        // The 256 byte aligned size of our uniform structure
+        static var alignedSize: Int { (MemoryLayout<UniformsArray>.size + 0xFF) & -0x100 }
+
+        mutating func setUniforms(index: Int, _ uniforms: Uniforms) {
+            switch index {
+            case 0: uniforms0 = uniforms
+            case 1: uniforms1 = uniforms
+            default: break
+            }
+        }
+    }
+
+    struct PackedHalf3 {
+        var x: Float16
+        var y: Float16
+        var z: Float16
+    }
+
+    struct PackedRGBHalf4 {
+        var r: Float16
+        var g: Float16
+        var b: Float16
+        var a: Float16
+    }
+
+    // Keep in sync with Shaders.metal : Splat
+    struct Splat {
+        var position: MTLPackedFloat3
+        var color: PackedRGBHalf4
+        var covA: PackedHalf3
+        var covB: PackedHalf3
+    }
+
+    struct SplatIndexAndDepth {
+        var index: UInt32
+        var depth: Float
+    }
+
+    public let device: MTLDevice
+    public let colorFormat: MTLPixelFormat
+    public let depthFormat: MTLPixelFormat
+    public let sampleCount: Int
+    public let maxViewCount: Int
+    public let maxSimultaneousRenders: Int
+
+    /**
+     High-quality depth takes longer, but results in a continuous, more-representative depth buffer result, which is useful for reducing artifacts during Vision Pro's frame reprojection.
+     */
+    public var highQualityDepth: Bool = true
+
+    private var writeDepth: Bool {
+        depthFormat != .invalid
+    }
+
+    /**
+     The SplatRenderer has two shader pipelines.
+     - The single stage has a vertex shader, and a fragment shader. It can produce depth (or not), but the depth it produces is the depth of the nearest splat, whether it's visible or now.
+     - The multi-stage pipeline uses a set of shaders which communicate using imageblock tile memory: initialization (which clears the tile memory), draw splats (similar to the single-stage
+     pipeline but the end result is tile memory, not color+depth), and a post-process stage which merely copies the tile memory (color and optionally depth) to the frame's buffers.
+     This is neccessary so that the primary stage can do its own blending -- of both color and depth -- by reading the previous values and writing new ones, which isn't possible without tile
+     memory. Color blending works the same as the hardcoded path, but depth blending uses color alpha and results in mostly-transparent splats contributing only slightly to the depth,
+     resulting in a much more continuous and representative depth value, which is important for reprojection on Vision Pro.
+     */
+    private var useMultiStagePipeline: Bool {
+#if targetEnvironment(simulator)
+        false
+#else
+        writeDepth && highQualityDepth
+#endif
+    }
+
+    public var clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0)
+
+    public var onSortStart: (() -> Void)?
+    public var onSortComplete: ((TimeInterval) -> Void)?
+
+    private let library: MTLLibrary
+    // Single-stage pipeline
+    private var singleStagePipelineState: MTLRenderPipelineState?
+    private var singleStageDepthState: MTLDepthStencilState?
+    // Multi-stage pipeline
+    private var initializePipelineState: MTLRenderPipelineState?
+    private var drawSplatPipelineState: MTLRenderPipelineState?
+    private var drawSplatDepthState: MTLDepthStencilState?
+    private var postprocessPipelineState: MTLRenderPipelineState?
+    private var postprocessDepthState: MTLDepthStencilState?
+
+    // dynamicUniformBuffers contains maxSimultaneousRenders uniforms buffers,
+    // which we round-robin through, one per render; this is managed by switchToNextDynamicBuffer.
+    // uniforms = the i'th buffer (where i = uniformBufferIndex, which varies from 0 to maxSimultaneousRenders-1)
+    var dynamicUniformBuffers: MTLBuffer
+    var uniformBufferOffset = 0
+    var uniformBufferIndex = 0
+    var uniforms: UnsafeMutablePointer<UniformsArray>
+
+    // cameraWorldPosition and Forward vectors are the latest mean camera position across all viewports
+    var cameraWorldPosition: SIMD3<Float> = .zero
+    var cameraWorldForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+
+    typealias IndexType = UInt32
+    // splatBuffer contains one entry for each gaussian splat
+    var splatBuffer: SplatMetalBuffer<Splat>
+    // splatBufferPrime is a copy of splatBuffer, which is not currenly in use for rendering.
+    // We use this for sorting, and when we're done, swap it with splatBuffer.
+    // There's a good chance that we'll sometimes end up sorting a splatBuffer still in use for
+    // rendering.
+    // TODO: Replace this with a more robust multiple-buffer scheme to guarantee we're never actively sorting a buffer still in use for rendering
+    var splatBufferPrime: SplatMetalBuffer<Splat>
+
+    var indexBuffer: SplatMetalBuffer<UInt32>
+
+    public var splatCount: Int { splatBuffer.count }
+
+    var sorting = false
+    var orderAndDepthTempSort: [SplatIndexAndDepth] = []
+
+    public init(device: MTLDevice,
+                colorFormat: MTLPixelFormat,
+                depthFormat: MTLPixelFormat,
+                sampleCount: Int,
+                maxViewCount: Int,
+                maxSimultaneousRenders: Int) throws {
+#if arch(x86_64)
+        fatalError("MetalSplatter is unsupported on Intel architecture (x86_64)")
+#endif
+
         self.device = device
+
+        self.colorFormat = colorFormat
+        self.depthFormat = depthFormat
+        self.sampleCount = sampleCount
+        self.maxViewCount = min(maxViewCount, Constants.maxViewCount)
+        self.maxSimultaneousRenders = maxSimultaneousRenders
+
+        let dynamicUniformBuffersSize = UniformsArray.alignedSize * maxSimultaneousRenders
+        self.dynamicUniformBuffers = device.makeBuffer(length: dynamicUniformBuffersSize,
+                                                       options: .storageModeShared)!
+        self.dynamicUniformBuffers.label = "Uniform Buffers"
+        self.uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents()).bindMemory(to: UniformsArray.self, capacity: 1)
+
+        self.splatBuffer = try SplatMetalBuffer(device: device)
+        self.splatBufferPrime = try SplatMetalBuffer(device: device)
+        self.indexBuffer = try SplatMetalBuffer(device: device)
+
+        library = device.makeDefaultLibrary()!
+    }
+
+    public func reset() {
+        splatBuffer.count = 0
+        try? splatBuffer.setCapacity(0)
+    }
+
+    /// Add LiDAR points with positions, colors, and covariances (diagonal elements)
+    public func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>], covariances: [SIMD3<Float>]) {
+        guard positions.count == colors.count && colors.count == covariances.count else {
+            Self.log.error("addPoints: Array sizes must match")
+            return
+        }
         
-        // 1. Load Library
-        // 2. Create Pipeline States for all kernels
-        // 3. Allocate initial buffers (can resize dynamically)
-        let library = device.makeDefaultLibrary()!
-                
-                // Create compute pipeline states
-                projectPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "project_gaussians_forward_kernel")!)
-                mapIntersectsPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "map_gaussian_to_intersects_kernel")!)
-                sortPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "bitonic_sort_kernel")!)
-                tileBinPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "get_tile_bin_edges_kernel")!)
-                rasterizePipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "nd_rasterize_forward_kernel")!)
-                displayPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "display_kernel")!)
-                clearBufferPipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "clear_buffer_kernel")!)
-                
-                // Create render pipeline for copying intermediate texture to drawable
-                let copyPipelineDescriptor = MTLRenderPipelineDescriptor()
-                copyPipelineDescriptor.vertexFunction = library.makeFunction(name: "copyVertex")
-                copyPipelineDescriptor.fragmentFunction = library.makeFunction(name: "copyFragment")
-                copyPipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-                copyPipeline = try? device.makeRenderPipelineState(descriptor: copyPipelineDescriptor)
-                
-                // Initialize Helper Classes
-                prefixSum = PrefixSum(device: device)
-                bitonicSort = BitonicSort(device: device)
-                
-                // Allocate initial buffers with reasonable default sizes
-                let initialMaxPoints = 1000000
-                let initialMaxIntersects = 100000
-                
-                // Gaussian data buffers
-                meansBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
-                scalesBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
-                quatsBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD4<Float>>.stride, options: .storageModeShared)
-                opacitiesBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<Float>.stride, options: .storageModeShared)
-                colorsBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
-                
-                // Intermediate buffers
-                cov3dBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD3<Float>>.stride * 2, options: .storageModePrivate)
-                xysBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD2<Float>>.stride, options: .storageModePrivate)
-                depthsBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<Float>.stride, options: .storageModePrivate)
-                radiiBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<Int32>.stride, options: .storageModePrivate)
-                conicsBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<SIMD3<Float>>.stride, options: .storageModePrivate)
-                numTilesHitBuffer = device.makeBuffer(length: initialMaxPoints * MemoryLayout<Int32>.stride, options: .storageModeShared)
-                
-                // Sorting buffers
-                isectIdsBuffer = device.makeBuffer(length: initialMaxIntersects * MemoryLayout<UInt64>.stride, options: .storageModePrivate)
-                gaussianIdsBuffer = device.makeBuffer(length: initialMaxIntersects * MemoryLayout<Int32>.stride, options: .storageModePrivate)
-                
-                // Tile bins buffer (assuming 16x16 tiles for typical screen)
-                let maxTiles = 256 * 256
-                tileBinsBuffer = device.makeBuffer(length: maxTiles * MemoryLayout<SIMD2<Int32>>.stride, options: .storageModePrivate)
-                
-                // Image buffer (assuming max 4K resolution for now, resize in draw if needed)
-                let maxPixels = 3840 * 2160
-                imgBuffer = device.makeBuffer(length: maxPixels * 3 * MemoryLayout<Float>.stride, options: .storageModePrivate)
-                
-                // Rasterization scratch buffers
-                finalTsBuffer = device.makeBuffer(length: maxPixels * MemoryLayout<Float>.stride, options: .storageModePrivate)
-                finalIndexBuffer = device.makeBuffer(length: maxPixels * MemoryLayout<Int32>.stride, options: .storageModePrivate)
+        do {
+            try ensureAdditionalCapacity(positions.count)
+        } catch {
+            Self.log.error("Failed to grow buffers: \(error)")
+            return
+        }
+        
+        for i in 0..<positions.count {
+            let position = positions[i]
+            let color = colors[i]
+            let cov = covariances[i]  // Diagonal covariance elements (variances)
+            
+            // For isotropic splats from LiDAR, covariance is diagonal (scale^2 on diagonal)
+            // covA = [cov_xx, cov_xy, cov_xz] = [cov.x, 0, 0]
+            // covB = [cov_yy, cov_yz, cov_zz] = [cov.y, 0, cov.z]
+            let splat = Splat(
+                position: MTLPackedFloat3Make(position.x, position.y, position.z),
+                color: PackedRGBHalf4(r: Float16(color.x), g: Float16(color.y), b: Float16(color.z), a: Float16(1.0)),
+                covA: PackedHalf3(x: Float16(cov.x), y: Float16(0), z: Float16(0)),
+                covB: PackedHalf3(x: Float16(cov.y), y: Float16(0), z: Float16(cov.z))
+            )
+            splatBuffer.append(splat)
+        }
+        
+        Self.log.info("Added \(positions.count) splats, total count: \(self.splatBuffer.count)")
     }
     
-    // MARK: - Data Loading
-    func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>]) {
-        let defaultScale = SIMD3<Float>(0.01, 0.01, 0.01)
-        let covariances = Array(repeating: defaultScale, count: positions.count)
+    /// Add LiDAR points with positions and colors using a default scale
+    public func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>]) {
+        // Use a default scale of 0.005 (5mm) for LiDAR points
+        // Covariance = scale^2 = 0.000025
+        let defaultCovariance: Float = 0.005 * 0.005
+        let covariances = [SIMD3<Float>](repeating: SIMD3<Float>(repeating: defaultCovariance), count: positions.count)
         addPoints(positions: positions, colors: colors, covariances: covariances)
     }
 
-    func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>], covariances: [SIMD3<Float>]) {
-        // 1. Append new data to meansBuffer, colorsBuffer
-        // 2. Initialize scales (e.g., 0.01), quats (Identity), opacities (1.0)
-        // 3. Resize intermediate buffers if maxPoints exceeded
-        guard positions.count == colors.count && positions.count == covariances.count else {
-            print("[GaussianSplatRenderer] Error: positions, colors, and covariances arrays must have the same count")
-            return
-        }
-        
-        let newPointCount = positions.count
-        guard newPointCount > 0 else { 
-            print("[GaussianSplatRenderer] addPoints called with 0 points")
-            return 
-        }
-        
-        print("[GaussianSplatRenderer] addPoints called with \(newPointCount) points (current total: \(pointCount))")
-        
-        // Get current point count from buffer capacity
-        let currentCapacity = meansBuffer.length / MemoryLayout<SIMD3<Float>>.stride
-        let device = meansBuffer.device
-        
-        // Calculate new total point count
-        let totalPointCount = pointCount + newPointCount
-        
-        // Resize buffers if needed
-        if totalPointCount > currentCapacity {
-            let newCapacity = max(totalPointCount, currentCapacity * 2)
-            print("[GaussianSplatRenderer] Resizing buffers from \(currentCapacity) to \(newCapacity)")
-            
-            // Save old buffers to copy data
-            let oldMeansBuffer = meansBuffer
-            let oldScalesBuffer = scalesBuffer
-            let oldQuatsBuffer = quatsBuffer
-            let oldOpacitiesBuffer = opacitiesBuffer
-            let oldColorsBuffer = colorsBuffer
-            
-            // Reallocate Gaussian data buffers
-            meansBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
-            scalesBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
-            quatsBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD4<Float>>.stride, options: .storageModeShared)
-            opacitiesBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<Float>.stride, options: .storageModeShared)
-            colorsBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride, options: .storageModeShared)
-            
-            // Copy existing data
-            if pointCount > 0, let oldMeans = oldMeansBuffer, let oldScales = oldScalesBuffer,
-               let oldQuats = oldQuatsBuffer, let oldOpacities = oldOpacitiesBuffer, let oldColors = oldColorsBuffer {
-                memcpy(meansBuffer.contents(), oldMeans.contents(), pointCount * MemoryLayout<SIMD3<Float>>.stride)
-                memcpy(scalesBuffer.contents(), oldScales.contents(), pointCount * MemoryLayout<SIMD3<Float>>.stride)
-                memcpy(quatsBuffer.contents(), oldQuats.contents(), pointCount * MemoryLayout<SIMD4<Float>>.stride)
-                memcpy(opacitiesBuffer.contents(), oldOpacities.contents(), pointCount * MemoryLayout<Float>.stride)
-                memcpy(colorsBuffer.contents(), oldColors.contents(), pointCount * MemoryLayout<SIMD3<Float>>.stride)
-            }
-            
-            // Reallocate intermediate buffers
-            cov3dBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride * 2, options: .storageModePrivate)
-            xysBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD2<Float>>.stride, options: .storageModePrivate)
-            depthsBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<Float>.stride, options: .storageModePrivate)
-            radiiBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<Int32>.stride, options: .storageModePrivate)
-            conicsBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<SIMD3<Float>>.stride, options: .storageModePrivate)
-            numTilesHitBuffer = device.makeBuffer(length: newCapacity * MemoryLayout<Int32>.stride, options: .storageModeShared)
-            
-            // Reallocate sorting buffers with larger intersection capacity
-            // Ensure capacity is Power of Two for Bitonic Sort
-            let rawIntersectCapacity = newCapacity * 10 // Assume avg 10 tiles per splat
-            var potIntersectCapacity = 1
-            while potIntersectCapacity < rawIntersectCapacity { potIntersectCapacity <<= 1 }
-            
-            isectIdsBuffer = device.makeBuffer(length: potIntersectCapacity * MemoryLayout<UInt64>.stride, options: .storageModePrivate)
-            gaussianIdsBuffer = device.makeBuffer(length: potIntersectCapacity * MemoryLayout<Int32>.stride, options: .storageModePrivate)
-        }
-        
-        // Append new position data (starting from current pointCount)
-        let meansPointer = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: totalPointCount)
-        for i in 0..<newPointCount {
-            meansPointer[pointCount + i] = positions[i]
-        }
-        
-        // Append new color data
-        let colorsPointer = colorsBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: totalPointCount)
-        for i in 0..<newPointCount {
-            colorsPointer[pointCount + i] = colors[i]
-        }
-        
-        // Append covariance data (scale components)
-        let scalesPointer = scalesBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: totalPointCount)
-        for i in 0..<newPointCount {
-            scalesPointer[pointCount + i] = covariances[i]
-        }
-        
-        // Initialize quaternions to identity rotation
-        let quatsPointer = quatsBuffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: totalPointCount)
-        for i in 0..<newPointCount {
-            quatsPointer[pointCount + i] = SIMD4<Float>(0, 0, 0, 1) // Identity quaternion (x, y, z, w)
-        }
-        
-        // Initialize opacities to fully opaque
-        let opacitiesPointer = opacitiesBuffer.contents().bindMemory(to: Float.self, capacity: totalPointCount)
-        for i in 0..<newPointCount {
-            opacitiesPointer[pointCount + i] = 1.0
-        }
-        
-        // Update total point count
-        self.pointCount = totalPointCount
-        print("[GaussianSplatRenderer] Total points now: \(pointCount)")
+    private func resetPipelineStates() {
+        singleStagePipelineState = nil
+        initializePipelineState = nil
+        drawSplatPipelineState = nil
+        drawSplatDepthState = nil
+        postprocessPipelineState = nil
+        postprocessDepthState = nil
     }
-    
-    // MARK: - Public Accessors
-    
-    /// Returns the current number of Gaussian splats
-    func getPointCount() -> Int {
-        return pointCount
+
+    private func buildSingleStagePipelineStatesIfNeeded() throws {
+        guard singleStagePipelineState == nil else { return }
+
+        singleStagePipelineState = try buildSingleStagePipelineState()
+        singleStageDepthState = try buildSingleStageDepthState()
     }
-    
-    /// Clears all points
-    func clearPoints() {
-        pointCount = 0
-        print("[GaussianSplatRenderer] Cleared all points")
+
+    private func buildMultiStagePipelineStatesIfNeeded() throws {
+        guard initializePipelineState == nil else { return }
+
+        initializePipelineState = try buildInitializePipelineState()
+        drawSplatPipelineState = try buildDrawSplatPipelineState()
+        drawSplatDepthState = try buildDrawSplatDepthState()
+        postprocessPipelineState = try buildPostprocessPipelineState()
+        postprocessDepthState = try buildPostprocessDepthState()
     }
-    
-    
-    // MARK: - Draw Loop
-    func draw(commandBuffer: MTLCommandBuffer, 
-              viewMatrix: matrix_float4x4, 
-              projectionMatrix: matrix_float4x4, 
-              viewport: CGSize, 
-              outputTexture: MTLTexture) {
-        
-        // Skip rendering if no points
-        guard pointCount > 0 else {
-            // Only print occasionally to avoid spam
-            print("[GaussianSplatRenderer] No points to render")
-            return
+
+    private func buildSingleStagePipelineState() throws -> MTLRenderPipelineState {
+        assert(!useMultiStagePipeline)
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+
+        pipelineDescriptor.label = "SingleStagePipeline"
+        pipelineDescriptor.vertexFunction = library.makeRequiredFunction(name: "singleStageSplatVertexShader")
+        pipelineDescriptor.fragmentFunction = library.makeRequiredFunction(name: "singleStageSplatFragmentShader")
+
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        let colorAttachment = pipelineDescriptor.colorAttachments[0]!
+        colorAttachment.pixelFormat = colorFormat
+        colorAttachment.isBlendingEnabled = true
+        colorAttachment.rgbBlendOperation = .add
+        colorAttachment.alphaBlendOperation = .add
+        colorAttachment.sourceRGBBlendFactor = .one
+        colorAttachment.sourceAlphaBlendFactor = .one
+        colorAttachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        colorAttachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+        pipelineDescriptor.colorAttachments[0] = colorAttachment
+
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildSingleStageDepthState() throws -> MTLDepthStencilState {
+        assert(!useMultiStagePipeline)
+
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
+        depthStateDescriptor.isDepthWriteEnabled = writeDepth
+        return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+    }
+
+    private func buildInitializePipelineState() throws -> MTLRenderPipelineState {
+        assert(useMultiStagePipeline)
+
+        let pipelineDescriptor = MTLTileRenderPipelineDescriptor()
+
+        pipelineDescriptor.label = "InitializePipeline"
+        pipelineDescriptor.tileFunction = library.makeRequiredFunction(name: "initializeFragmentStore")
+        pipelineDescriptor.threadgroupSizeMatchesTileSize = true;
+        pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
+
+        return try device.makeRenderPipelineState(tileDescriptor: pipelineDescriptor, options: [], reflection: nil)
+    }
+
+    private func buildDrawSplatPipelineState() throws -> MTLRenderPipelineState {
+        assert(useMultiStagePipeline)
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+
+        pipelineDescriptor.label = "DrawSplatPipeline"
+        pipelineDescriptor.vertexFunction = library.makeRequiredFunction(name: "multiStageSplatVertexShader")
+        pipelineDescriptor.fragmentFunction = library.makeRequiredFunction(name: "multiStageSplatFragmentShader")
+
+        pipelineDescriptor.rasterSampleCount = sampleCount
+
+        pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildDrawSplatDepthState() throws -> MTLDepthStencilState {
+        assert(useMultiStagePipeline)
+
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
+        depthStateDescriptor.isDepthWriteEnabled = writeDepth
+        return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+    }
+
+    private func buildPostprocessPipelineState() throws -> MTLRenderPipelineState {
+        assert(useMultiStagePipeline)
+
+        let pipelineDescriptor = MTLRenderPipelineDescriptor()
+
+        pipelineDescriptor.label = "PostprocessPipeline"
+        pipelineDescriptor.vertexFunction =
+            library.makeRequiredFunction(name: "postprocessVertexShader")
+        pipelineDescriptor.fragmentFunction =
+            writeDepth
+            ? library.makeRequiredFunction(name: "postprocessFragmentShader")
+            : library.makeRequiredFunction(name: "postprocessFragmentShaderNoDepth")
+
+        pipelineDescriptor.colorAttachments[0]!.pixelFormat = colorFormat
+        pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
+
+        pipelineDescriptor.maxVertexAmplificationCount = maxViewCount
+
+        return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+    }
+
+    private func buildPostprocessDepthState() throws -> MTLDepthStencilState {
+        assert(useMultiStagePipeline)
+
+        let depthStateDescriptor = MTLDepthStencilDescriptor()
+        depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
+        depthStateDescriptor.isDepthWriteEnabled = writeDepth
+        return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+    }
+
+    public func ensureAdditionalCapacity(_ pointCount: Int) throws {
+        try splatBuffer.ensureCapacity(splatBuffer.count + pointCount)
+    }
+
+    private func switchToNextDynamicBuffer() {
+        uniformBufferIndex = (uniformBufferIndex + 1) % maxSimultaneousRenders
+        uniformBufferOffset = UniformsArray.alignedSize * uniformBufferIndex
+        uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents() + uniformBufferOffset).bindMemory(to: UniformsArray.self, capacity: 1)
+    }
+
+    private func updateUniforms(forViewports viewports: [ViewportDescriptor],
+                                splatCount: UInt32,
+                                indexedSplatCount: UInt32) {
+        for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
+            let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
+                                    viewMatrix: viewport.viewMatrix,
+                                    screenSize: SIMD2(x: UInt32(viewport.screenSize.x), y: UInt32(viewport.screenSize.y)),
+                                    splatCount: splatCount,
+                                    indexedSplatCount: indexedSplatCount)
+            self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
-        
-        print("[GaussianSplatRenderer] Drawing \(pointCount) splats, viewport: \(viewport)")
-        
-        // 1. Projection Pass
-        // ------------------
-        // Calculates 2D attributes and how many tiles each splat hits.
-        // Kernel: project_gaussians_forward_kernel
-        // Writes to: num_tiles_hitBuffer (as Counts)
-        dispatchProjection(commandBuffer: commandBuffer, 
-                           viewMatrix: viewMatrix, 
-                           projectionMatrix: projectionMatrix, 
-                           viewport: viewport)
-        
-        // 2. Prefix Sum (Scan) Pass
-        // -------------------------
-        // Converts "Counts" to "Offsets" so we know where to write in the sort buffer.
-        // Input: num_tiles_hitBuffer (Counts)
-        // Output: num_tiles_hitBuffer (Offsets)
-        // Note: Can be CPU roundtrip for MVP, or GPU Blelloch Scan for performance.
-        performPrefixSum(commandBuffer: commandBuffer)
-        
-        // 3. Binning Pass
-        // ---------------
-        // Populates the sort keys based on the offsets calculated above.
-        // Kernel: map_gaussian_to_intersects_kernel
-        // Input: num_tiles_hitBuffer (Offsets)
-        // Writes to: isectIdsBuffer, gaussianIdsBuffer
-        
-        // Initialize sort buffer to UINT64_MAX before binning so unused slots sort to end
-        let capacity = isectIdsBuffer.length / MemoryLayout<UInt64>.stride
-        bitonicSort.pad(commandBuffer: commandBuffer, keys: isectIdsBuffer, startIndex: 0, endIndex: capacity)
-        
-        dispatchBinning(commandBuffer: commandBuffer, viewport: viewport)
-        
-        // 4. Sorting Pass
-        // ---------------
-        // Sorts the splats by TileID (primary) and Depth (secondary).
-        // Kernel: Bitonic Sort (multiple dispatches)
-        // Sorts: isectIdsBuffer and gaussianIdsBuffer in place
-        dispatchSort(commandBuffer: commandBuffer)
-        
-        // 5. Tile Range Pass
-        // ------------------
-        // Identifies the start and end indices for each tile in the sorted list.
-        // Kernel: get_tile_bin_edges_kernel
-        // Writes to: tileBinsBuffer
-        dispatchTileBinning(commandBuffer: commandBuffer)
-        
-        // 6. Rasterization Pass
-        // ---------------------
-        // The heavy lifter. Draws the sorted splats tile-by-tile.
-        // Kernel: nd_rasterize_forward_kernel
-        // Input: tileBinsBuffer, sorted gaussianIdsBuffer
-        // Output: Intermediate Image Buffer
-        dispatchRasterization(commandBuffer: commandBuffer, viewport: viewport)
-        
-        // 7. Display Pass
-        // ---------------
-        // Copies the raw float buffer to the drawable texture.
-        dispatchDisplay(commandBuffer: commandBuffer, texture: outputTexture)
+
+        cameraWorldPosition = viewports.map { Self.cameraWorldPosition(forViewMatrix: $0.viewMatrix) }.mean ?? .zero
+        cameraWorldForward = viewports.map { Self.cameraWorldForward(forViewMatrix: $0.viewMatrix) }.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
+
+        // Disable sorting for now - it causes issues when continuously adding points
+        // The async sort swaps buffers which loses newly added points
+        // TODO: Implement a proper double-buffering scheme that handles concurrent adds
+        // if !sorting {
+        //     resort()
+        // }
     }
-    
-    // MARK: - Helper Dispatch Functions
-    
-    private func dispatchProjection(commandBuffer: MTLCommandBuffer, 
-                                    viewMatrix: matrix_float4x4, 
-                                    projectionMatrix: matrix_float4x4, 
-                                    viewport: CGSize) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Projection Pass"
-        encoder.setComputePipelineState(projectPipeline)
-        
-        var numPoints = Int32(pointCount)
-        var globScale: Float = 1.0 // TODO: Expose this
-        var clipThresh: Float = 0.2
-        var imgSize = SIMD2<UInt32>(UInt32(viewport.width), UInt32(viewport.height))
-        var tileBounds = SIMD3<UInt32>((UInt32(viewport.width) + 15) / 16, (UInt32(viewport.height) + 15) / 16, 1)
-        
-        // Set Buffers
-        encoder.setBytes(&numPoints, length: MemoryLayout<Int32>.size, index: 0)
-        encoder.setBuffer(meansBuffer, offset: 0, index: 1)
-        encoder.setBuffer(scalesBuffer, offset: 0, index: 2)
-        encoder.setBytes(&globScale, length: MemoryLayout<Float>.size, index: 3)
-        encoder.setBuffer(quatsBuffer, offset: 0, index: 4)
-        
-        var viewMat = viewMatrix
-        var projMat = projectionMatrix
-        encoder.setBytes(&viewMat, length: MemoryLayout<matrix_float4x4>.size, index: 5)
-        encoder.setBytes(&projMat, length: MemoryLayout<matrix_float4x4>.size, index: 6)
-        
-        // Intrinsics (Approximation from projection matrix)
-        let fx = projectionMatrix.columns.0.x * Float(viewport.width) / 2.0
-        let fy = projectionMatrix.columns.1.y * Float(viewport.height) / 2.0
-        let cx = Float(viewport.width) / 2.0
-        let cy = Float(viewport.height) / 2.0
-        var intrins = SIMD4<Float>(fx, fy, cx, cy)
-        encoder.setBytes(&intrins, length: MemoryLayout<SIMD4<Float>>.size, index: 7)
-        
-        encoder.setBytes(&imgSize, length: MemoryLayout<SIMD2<UInt32>>.size, index: 8)
-        encoder.setBytes(&tileBounds, length: MemoryLayout<SIMD3<UInt32>>.size, index: 9)
-        encoder.setBytes(&clipThresh, length: MemoryLayout<Float>.size, index: 10)
-        
-        encoder.setBuffer(cov3dBuffer, offset: 0, index: 11)
-        encoder.setBuffer(xysBuffer, offset: 0, index: 12)
-        encoder.setBuffer(depthsBuffer, offset: 0, index: 13)
-        encoder.setBuffer(radiiBuffer, offset: 0, index: 14)
-        encoder.setBuffer(conicsBuffer, offset: 0, index: 15)
-        encoder.setBuffer(numTilesHitBuffer, offset: 0, index: 16)
-        
-        let gridSize = MTLSize(width: pointCount, height: 1, depth: 1)
-        let threadGroupSize = MTLSize(width: min(projectPipeline.maxTotalThreadsPerThreadgroup, pointCount), height: 1, depth: 1)
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-        
-        encoder.endEncoding()
+
+    private static func cameraWorldForward(forViewMatrix view: simd_float4x4) -> simd_float3 {
+        (view.inverse * SIMD4<Float>(x: 0, y: 0, z: -1, w: 0)).xyz
     }
-    
-    private func performPrefixSum(commandBuffer: MTLCommandBuffer) {
-        // GPU Parallel Scan using PrefixSum helper class
-        prefixSum.compute(commandBuffer: commandBuffer, 
-                          inputBuffer: numTilesHitBuffer, 
-                          outputBuffer: numTilesHitBuffer, 
-                          count: pointCount)
+
+    private static func cameraWorldPosition(forViewMatrix view: simd_float4x4) -> simd_float3 {
+        (view.inverse * SIMD4<Float>(x: 0, y: 0, z: 0, w: 1)).xyz
     }
-    
-    private func dispatchBinning(commandBuffer: MTLCommandBuffer, viewport: CGSize) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Binning Pass"
-        encoder.setComputePipelineState(mapIntersectsPipeline)
-        
-        var numPoints = Int32(pointCount)
-        var tileBounds = SIMD3<UInt32>((UInt32(viewport.width) + 15) / 16, (UInt32(viewport.height) + 15) / 16, 1)
-        
-        encoder.setBytes(&numPoints, length: MemoryLayout<Int32>.size, index: 0)
-        encoder.setBuffer(xysBuffer, offset: 0, index: 1)
-        encoder.setBuffer(depthsBuffer, offset: 0, index: 2)
-        encoder.setBuffer(radiiBuffer, offset: 0, index: 3)
-        encoder.setBuffer(numTilesHitBuffer, offset: 0, index: 4) // Now contains offsets
-        encoder.setBytes(&tileBounds, length: MemoryLayout<SIMD3<UInt32>>.size, index: 5)
-        encoder.setBuffer(isectIdsBuffer, offset: 0, index: 6)
-        encoder.setBuffer(gaussianIdsBuffer, offset: 0, index: 7)
-        
-        let gridSize = MTLSize(width: pointCount, height: 1, depth: 1)
-        let threadGroupSize = MTLSize(width: min(mapIntersectsPipeline.maxTotalThreadsPerThreadgroup, pointCount), height: 1, depth: 1)
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-        
-        encoder.endEncoding()
-    }
-    
-    private func dispatchSort(commandBuffer: MTLCommandBuffer) {
-        // Bitonic Sort Logic:
-        // 1. Pad the unused portion of the buffer with UINT64_MAX
-        // 2. Sort the entire power-of-two buffer
-        
-        let capacity = isectIdsBuffer.length / MemoryLayout<UInt64>.stride
-        
-        bitonicSort.sort(commandBuffer: commandBuffer, 
-                         keys: isectIdsBuffer, 
-                         values: gaussianIdsBuffer, 
-                         count: capacity)
-    }
-    
-    private func dispatchTileBinning(commandBuffer: MTLCommandBuffer) {
-        // Clear tile bins first
-        guard let clearEncoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        clearEncoder.label = "Clear Tile Bins"
-        clearEncoder.setComputePipelineState(clearBufferPipeline)
-        clearEncoder.setBuffer(tileBinsBuffer, offset: 0, index: 0)
-        var zero: Int32 = 0 // Or -1 depending on logic, using 0 for now as default
-        clearEncoder.setBytes(&zero, length: MemoryLayout<Int32>.size, index: 1)
-        let clearGrid = MTLSize(width: tileBinsBuffer.length / MemoryLayout<Int32>.stride, height: 1, depth: 1)
-        let clearThreads = MTLSize(width: min(clearBufferPipeline.maxTotalThreadsPerThreadgroup, clearGrid.width), height: 1, depth: 1)
-        clearEncoder.dispatchThreads(clearGrid, threadsPerThreadgroup: clearThreads)
-        clearEncoder.endEncoding()
-        
-        // Bin Edges
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Tile Bin Edges"
-        encoder.setComputePipelineState(tileBinPipeline)
-        
-        // We use the full capacity because we padded with UINT64_MAX
-        var numIntersects = Int32(isectIdsBuffer.length / MemoryLayout<UInt64>.stride)
-        
-        encoder.setBytes(&numIntersects, length: MemoryLayout<Int32>.size, index: 0)
-        encoder.setBuffer(isectIdsBuffer, offset: 0, index: 1)
-        encoder.setBuffer(tileBinsBuffer, offset: 0, index: 2)
-        
-        let gridSize = MTLSize(width: Int(numIntersects), height: 1, depth: 1)
-        let threadGroupSize = MTLSize(width: min(tileBinPipeline.maxTotalThreadsPerThreadgroup, Int(numIntersects)), height: 1, depth: 1)
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-        
-        encoder.endEncoding()
-    }
-    
-    // Ensure intermediate texture exists and matches size
-    private func ensureIntermediateTexture(width: Int, height: Int) {
-        if intermediateTexture == nil || 
-           intermediateTexture!.width != width || 
-           intermediateTexture!.height != height {
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm,
-                width: width,
-                height: height,
-                mipmapped: false
-            )
-            descriptor.usage = [.shaderRead, .shaderWrite]
-            descriptor.storageMode = .private
-            intermediateTexture = device.makeTexture(descriptor: descriptor)
-        }
-    }
-    
-    private func dispatchDisplay(commandBuffer: MTLCommandBuffer, texture: MTLTexture) {
-        // Ensure we have an intermediate texture of the right size
-        ensureIntermediateTexture(width: texture.width, height: texture.height)
-        
-        guard let intermediateTex = intermediateTexture else { return }
-        
-        // First, write to the intermediate texture (which supports compute writes)
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Display Pass"
-        encoder.setComputePipelineState(displayPipeline)
-        
-        encoder.setBuffer(imgBuffer, offset: 0, index: 0)
-        encoder.setTexture(intermediateTex, index: 0)
-        
-        var imgSize = SIMD2<UInt32>(UInt32(texture.width), UInt32(texture.height))
-        encoder.setBytes(&imgSize, length: MemoryLayout<SIMD2<UInt32>>.size, index: 1)
-        
-        let gridSize = MTLSize(width: texture.width, height: texture.height, depth: 1)
-        let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
-        
-        encoder.endEncoding()
-        
-        // Now copy from intermediate texture to drawable using a render pass
+
+    func renderEncoder(multiStage: Bool,
+                       viewports: [ViewportDescriptor],
+                       colorTexture: MTLTexture,
+                       colorStoreAction: MTLStoreAction,
+                       depthTexture: MTLTexture?,
+                       rasterizationRateMap: MTLRasterizationRateMap?,
+                       renderTargetArrayLength: Int,
+                       for commandBuffer: MTLCommandBuffer) -> MTLRenderCommandEncoder {
         let renderPassDescriptor = MTLRenderPassDescriptor()
-        renderPassDescriptor.colorAttachments[0].texture = texture
-        renderPassDescriptor.colorAttachments[0].loadAction = .dontCare
-        renderPassDescriptor.colorAttachments[0].storeAction = .store
-        
-        guard let copyPipeline = copyPipeline,
-              let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
-        
-        renderEncoder.label = "Copy to Drawable"
-        renderEncoder.setRenderPipelineState(copyPipeline)
-        renderEncoder.setFragmentTexture(intermediateTex, index: 0)
-        renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        renderPassDescriptor.colorAttachments[0].texture = colorTexture
+        renderPassDescriptor.colorAttachments[0].loadAction = .clear
+        renderPassDescriptor.colorAttachments[0].storeAction = colorStoreAction
+        renderPassDescriptor.colorAttachments[0].clearColor = clearColor
+        if let depthTexture {
+            renderPassDescriptor.depthAttachment.texture = depthTexture
+            renderPassDescriptor.depthAttachment.loadAction = .clear
+            renderPassDescriptor.depthAttachment.storeAction = .store
+            renderPassDescriptor.depthAttachment.clearDepth = 0.0
+        }
+        renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
+        renderPassDescriptor.renderTargetArrayLength = renderTargetArrayLength
+
+        renderPassDescriptor.tileWidth  = Constants.tileSize.width
+        renderPassDescriptor.tileHeight = Constants.tileSize.height
+
+        if multiStage {
+            if let initializePipelineState {
+                renderPassDescriptor.imageblockSampleLength = initializePipelineState.imageblockSampleLength
+            } else {
+                Self.log.error("initializePipeline == nil in renderEncoder()")
+            }
+        }
+
+        guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else {
+            fatalError("Failed to create render encoder")
+        }
+
+        renderEncoder.label = "Primary Render Encoder"
+
+        renderEncoder.setViewports(viewports.map(\.viewport))
+
+        if viewports.count > 1 {
+            var viewMappings = (0..<viewports.count).map {
+                MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: UInt32($0),
+                                                  renderTargetArrayIndexOffset: UInt32($0))
+            }
+            renderEncoder.setVertexAmplificationCount(viewports.count, viewMappings: &viewMappings)
+        }
+
+        return renderEncoder
+    }
+
+    public func render(viewports: [ViewportDescriptor],
+                       colorTexture: MTLTexture,
+                       colorStoreAction: MTLStoreAction,
+                       depthTexture: MTLTexture?,
+                       rasterizationRateMap: MTLRasterizationRateMap?,
+                       renderTargetArrayLength: Int,
+                       to commandBuffer: MTLCommandBuffer) throws {
+        let splatCount = splatBuffer.count
+        guard splatBuffer.count != 0 else { return }
+        let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
+        let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
+
+        switchToNextDynamicBuffer()
+        updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
+
+        let multiStage = useMultiStagePipeline
+        if multiStage {
+            try buildMultiStagePipelineStatesIfNeeded()
+        } else {
+            try buildSingleStagePipelineStatesIfNeeded()
+        }
+
+        let renderEncoder = renderEncoder(multiStage: multiStage,
+                                          viewports: viewports,
+                                          colorTexture: colorTexture,
+                                          colorStoreAction: colorStoreAction,
+                                          depthTexture: depthTexture,
+                                          rasterizationRateMap: rasterizationRateMap,
+                                          renderTargetArrayLength: renderTargetArrayLength,
+                                          for: commandBuffer)
+
+        let indexCount = indexedSplatCount * 6
+        if indexBuffer.count < indexCount {
+            do {
+                try indexBuffer.ensureCapacity(indexCount)
+            } catch {
+                return
+            }
+            indexBuffer.count = indexCount
+            for i in 0..<indexedSplatCount {
+                indexBuffer.values[i * 6 + 0] = UInt32(i * 4 + 0)
+                indexBuffer.values[i * 6 + 1] = UInt32(i * 4 + 1)
+                indexBuffer.values[i * 6 + 2] = UInt32(i * 4 + 2)
+                indexBuffer.values[i * 6 + 3] = UInt32(i * 4 + 1)
+                indexBuffer.values[i * 6 + 4] = UInt32(i * 4 + 2)
+                indexBuffer.values[i * 6 + 5] = UInt32(i * 4 + 3)
+            }
+        }
+
+        if multiStage {
+            guard let initializePipelineState,
+                  let drawSplatPipelineState
+            else { return }
+
+            renderEncoder.pushDebugGroup("Initialize")
+            renderEncoder.setRenderPipelineState(initializePipelineState)
+            renderEncoder.dispatchThreadsPerTile(Constants.tileSize)
+            renderEncoder.popDebugGroup()
+
+            renderEncoder.pushDebugGroup("Draw Splats")
+            renderEncoder.setRenderPipelineState(drawSplatPipelineState)
+            renderEncoder.setDepthStencilState(drawSplatDepthState)
+        } else {
+            guard let singleStagePipelineState
+            else { return }
+
+            renderEncoder.pushDebugGroup("Draw Splats")
+            renderEncoder.setRenderPipelineState(singleStagePipelineState)
+            renderEncoder.setDepthStencilState(singleStageDepthState)
+        }
+
+        renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+        renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+
+        renderEncoder.drawIndexedPrimitives(type: .triangle,
+                                            indexCount: indexCount,
+                                            indexType: .uint32,
+                                            indexBuffer: indexBuffer.buffer,
+                                            indexBufferOffset: 0,
+                                            instanceCount: instanceCount)
+
+        if multiStage {
+            guard let postprocessPipelineState
+            else { return }
+
+            renderEncoder.popDebugGroup()
+
+            renderEncoder.pushDebugGroup("Postprocess")
+            renderEncoder.setRenderPipelineState(postprocessPipelineState)
+            renderEncoder.setDepthStencilState(postprocessDepthState)
+            renderEncoder.setCullMode(.none)
+            renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            renderEncoder.popDebugGroup()
+        } else {
+            renderEncoder.popDebugGroup()
+        }
+
         renderEncoder.endEncoding()
     }
 
-    private func dispatchRasterization(commandBuffer: MTLCommandBuffer, viewport: CGSize) {
-        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
-        encoder.label = "Rasterization Pass"
-        encoder.setComputePipelineState(rasterizePipeline)
-        
-        var tileBounds = SIMD3<UInt32>((UInt32(viewport.width) + 15) / 16, (UInt32(viewport.height) + 15) / 16, 1)
-        var imgSize = SIMD3<UInt32>(UInt32(viewport.width), UInt32(viewport.height), 1)
-        var channels: UInt32 = 3
-        var background = SIMD3<Float>(0, 0, 0) // Black background
-        
-        encoder.setBytes(&tileBounds, length: MemoryLayout<SIMD3<UInt32>>.size, index: 0)
-        encoder.setBytes(&imgSize, length: MemoryLayout<SIMD3<UInt32>>.size, index: 1)
-        encoder.setBytes(&channels, length: MemoryLayout<UInt32>.size, index: 2)
-        
-        encoder.setBuffer(gaussianIdsBuffer, offset: 0, index: 3)
-        encoder.setBuffer(tileBinsBuffer, offset: 0, index: 4)
-        encoder.setBuffer(xysBuffer, offset: 0, index: 5)
-        encoder.setBuffer(conicsBuffer, offset: 0, index: 6)
-        encoder.setBuffer(colorsBuffer, offset: 0, index: 7)
-        encoder.setBuffer(opacitiesBuffer, offset: 0, index: 8)
-        
-        // Use pre-allocated scratch buffers for final_Ts and final_index
-        encoder.setBuffer(finalTsBuffer, offset: 0, index: 9)
-        encoder.setBuffer(finalIndexBuffer, offset: 0, index: 10)
-        encoder.setBuffer(imgBuffer, offset: 0, index: 11)
-        encoder.setBytes(&background, length: MemoryLayout<SIMD3<Float>>.size, index: 12)
-        
-        // Threadgroup config - use var so we can pass by reference
-        var blockDim = SIMD2<UInt32>(16, 16)
-        encoder.setBytes(&blockDim, length: MemoryLayout<SIMD2<UInt32>>.size, index: 13)
-        
-        let threadsPerThreadgroup = MTLSize(width: 16, height: 16, depth: 1)
-        let threadgroups = MTLSize(width: Int(tileBounds.x), height: Int(tileBounds.y), depth: 1)
-        encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerThreadgroup)
-        
-        encoder.endEncoding()
+    // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
+    public func resort() {
+        guard !sorting else { return }
+        sorting = true
+        onSortStart?()
+        let sortStartTime = Date()
+
+        let splatCount = splatBuffer.count
+
+        let cameraWorldForward = cameraWorldForward
+        let cameraWorldPosition = cameraWorldPosition
+
+        Task(priority: .high) {
+            defer {
+                sorting = false
+                onSortComplete?(-sortStartTime.timeIntervalSinceNow)
+            }
+
+            if orderAndDepthTempSort.count != splatCount {
+                orderAndDepthTempSort = Array(repeating: SplatIndexAndDepth(index: .max, depth: 0), count: splatCount)
+            }
+
+            if Constants.sortByDistance {
+                for i in 0..<splatCount {
+                    orderAndDepthTempSort[i].index = UInt32(i)
+                    let splatPosition = splatBuffer.values[i].position.simd
+                    orderAndDepthTempSort[i].depth = (splatPosition - cameraWorldPosition).lengthSquared
+                }
+            } else {
+                for i in 0..<splatCount {
+                    orderAndDepthTempSort[i].index = UInt32(i)
+                    let splatPosition = splatBuffer.values[i].position.simd
+                    orderAndDepthTempSort[i].depth = dot(splatPosition, cameraWorldForward)
+                }
+            }
+
+            orderAndDepthTempSort.sort { $0.depth > $1.depth }
+
+            do {
+                try splatBufferPrime.setCapacity(splatCount)
+                splatBufferPrime.count = 0
+                for newIndex in 0..<orderAndDepthTempSort.count {
+                    let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
+                    splatBufferPrime.append(splatBuffer, fromIndex: oldIndex)
+                }
+
+                swap(&splatBuffer, &splatBufferPrime)
+            } catch {
+                // TODO: report error
+            }
+        }
     }
 }
+
+extension SplatRenderer.Splat {
+    /// Create a splat from position, color with alpha, scale, and rotation
+    init(position: SIMD3<Float>,
+         color: SIMD4<Float>,
+         scale: SIMD3<Float>,
+         rotation: simd_quatf) {
+        let transform = simd_float3x3(rotation) * simd_float3x3(diagonal: scale)
+        let cov3D = transform * transform.transpose
+        self.init(position: MTLPackedFloat3Make(position.x, position.y, position.z),
+                  color: SplatRenderer.PackedRGBHalf4(r: Float16(color.x), g: Float16(color.y), b: Float16(color.z), a: Float16(color.w)),
+                  covA: SplatRenderer.PackedHalf3(x: Float16(cov3D[0, 0]), y: Float16(cov3D[0, 1]), z: Float16(cov3D[0, 2])),
+                  covB: SplatRenderer.PackedHalf3(x: Float16(cov3D[1, 1]), y: Float16(cov3D[1, 2]), z: Float16(cov3D[2, 2])))
+    }
+}
+
+protocol MTLIndexTypeProvider {
+    static var asMTLIndexType: MTLIndexType { get }
+}
+
+extension UInt32: MTLIndexTypeProvider {
+    static var asMTLIndexType: MTLIndexType { .uint32 }
+}
+extension UInt16: MTLIndexTypeProvider {
+    static var asMTLIndexType: MTLIndexType { .uint16 }
+}
+
+extension Array where Element == SIMD3<Float> {
+    var mean: SIMD3<Float>? {
+        guard !isEmpty else { return nil }
+        return reduce(.zero, +) / Float(count)
+    }
+}
+
+private extension MTLPackedFloat3 {
+    var simd: SIMD3<Float> {
+        SIMD3(x: x, y: y, z: z)
+    }
+}
+
+private extension SIMD3 where Scalar: BinaryFloatingPoint, Scalar.RawSignificand: FixedWidthInteger {
+    var normalized: SIMD3<Scalar> {
+        self / Scalar(sqrt(lengthSquared))
+    }
+
+    var lengthSquared: Scalar {
+        x*x + y*y + z*z
+    }
+
+    func vector4(w: Scalar) -> SIMD4<Scalar> {
+        SIMD4<Scalar>(x: x, y: y, z: z, w: w)
+    }
+
+    static func random(in range: Range<Scalar>) -> SIMD3<Scalar> {
+        Self(x: Scalar.random(in: range), y: .random(in: range), z: .random(in: range))
+    }
+}
+
+private extension SIMD3<Float> {
+    var sRGBToLinear: SIMD3<Float> {
+        SIMD3(x: pow(x, 2.2), y: pow(y, 2.2), z: pow(z, 2.2))
+    }
+}
+
+private extension SIMD4 where Scalar: BinaryFloatingPoint {
+    var xyz: SIMD3<Scalar> {
+        .init(x: x, y: y, z: z)
+    }
+}
+
+private extension MTLLibrary {
+    func makeRequiredFunction(name: String) -> MTLFunction {
+        guard let result = makeFunction(name: name) else {
+            fatalError("Unable to load required shader function: \"\(name)\"")
+        }
+        return result
+    }
+}
+
+// MARK: - GaussianSplatRenderer wrapper for backward compatibility with Renderer.swift
+
+/// A wrapper around SplatRenderer that provides a simpler API for LiDAR point cloud rendering
+public class GaussianSplatRenderer {
+    private let splatRenderer: SplatRenderer
+    private let device: MTLDevice
+    
+    private static let log =
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "GaussianSplat",
+               category: "GaussianSplatRenderer")
+    
+    public init?(device: MTLDevice) {
+        self.device = device
+        
+        do {
+            // Use BGRA8 color format (standard drawable format)
+            // depth32Float for depth (or .invalid to skip depth)
+            // sampleCount 1 for standard rendering
+            self.splatRenderer = try SplatRenderer(
+                device: device,
+                colorFormat: .bgra8Unorm,
+                depthFormat: .invalid,  // No depth buffer needed for simple overlay
+                sampleCount: 1,
+                maxViewCount: 1,
+                maxSimultaneousRenders: 3
+            )
+            // Disable high-quality depth to use single-stage pipeline
+            self.splatRenderer.highQualityDepth = false
+        } catch {
+            Self.log.error("Failed to create SplatRenderer: \(error)")
+            return nil
+        }
+    }
+    
+    /// Add points with positions and colors
+    public func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>]) {
+        splatRenderer.addPoints(positions: positions, colors: colors)
+    }
+    
+    /// Add points with positions, colors, and covariances
+    public func addPoints(positions: [SIMD3<Float>], colors: [SIMD3<Float>], covariances: [SIMD3<Float>]) {
+        splatRenderer.addPoints(positions: positions, colors: colors, covariances: covariances)
+    }
+    
+    /// Reset all splats
+    public func reset() {
+        splatRenderer.reset()
+    }
+    
+    /// Number of splats currently loaded
+    public var splatCount: Int {
+        splatRenderer.splatCount
+    }
+    
+    /// Draw Gaussian splats to the output texture
+    public func draw(commandBuffer: MTLCommandBuffer,
+                     viewMatrix: simd_float4x4,
+                     projectionMatrix: simd_float4x4,
+                     viewport: CGSize,
+                     outputTexture: MTLTexture) {
+        
+        let viewportDescriptor = SplatRenderer.ViewportDescriptor(
+            viewport: MTLViewport(
+                originX: 0,
+                originY: 0,
+                width: Double(outputTexture.width),
+                height: Double(outputTexture.height),
+                znear: 0.0,
+                zfar: 1.0
+            ),
+            projectionMatrix: projectionMatrix,
+            viewMatrix: viewMatrix,
+            screenSize: SIMD2<Int>(outputTexture.width, outputTexture.height)
+        )
+        
+        do {
+            try splatRenderer.render(
+                viewports: [viewportDescriptor],
+                colorTexture: outputTexture,
+                colorStoreAction: .store,
+                depthTexture: nil,
+                rasterizationRateMap: nil,
+                renderTargetArrayLength: 0,
+                to: commandBuffer
+            )
+        } catch {
+            Self.log.error("Failed to render splats: \(error)")
+        }
+    }
+}
+

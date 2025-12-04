@@ -18,6 +18,10 @@
 		0DC3CAD32EE0E317001B0F91 /* radix_sort.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CACF2EE0E317001B0F91 /* radix_sort.metal */; };
 		0DC3CAD42EE0E317001B0F91 /* BitonicSort.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CACB2EE0E317001B0F91 /* BitonicSort.swift */; };
 		0DC3CAD52EE0E317001B0F91 /* bitonic_sort.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CACA2EE0E317001B0F91 /* bitonic_sort.metal */; };
+		0DC3CADC2EE102AD001B0F91 /* MultiStageRenderPath.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CAD62EE102AD001B0F91 /* MultiStageRenderPath.metal */; };
+		0DC3CADD2EE102AD001B0F91 /* SingleStageRenderPath.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CAD82EE102AD001B0F91 /* SingleStageRenderPath.metal */; };
+		0DC3CADE2EE102AD001B0F91 /* SplatBuffer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CAD92EE102AD001B0F91 /* SplatBuffer.swift */; };
+		0DC3CADF2EE102AD001B0F91 /* SplatProcessing.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DC3CADB2EE102AD001B0F91 /* SplatProcessing.metal */; };
 		0DDBAEF92E4A8EEB00074FFE /* MainController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE12E4A8EB400074FFE /* MainController.swift */; };
 		0DDBAEFA2E4A8EEB00074FFE /* Shaders.metal in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE62E4A8EB400074FFE /* Shaders.metal */; };
 		0DDBAEFB2E4A8EEB00074FFE /* XError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DDBAEE82E4A8EB400074FFE /* XError.swift */; };
@@ -80,6 +84,12 @@
 		0DC3CACD2EE0E317001B0F91 /* prefix_sum.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = prefix_sum.metal; sourceTree = "<group>"; };
 		0DC3CACE2EE0E317001B0F91 /* PrefixSum.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrefixSum.swift; sourceTree = "<group>"; };
 		0DC3CACF2EE0E317001B0F91 /* radix_sort.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = radix_sort.metal; sourceTree = "<group>"; };
+		0DC3CAD62EE102AD001B0F91 /* MultiStageRenderPath.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = MultiStageRenderPath.metal; sourceTree = "<group>"; };
+		0DC3CAD72EE102AD001B0F91 /* ShaderCommon.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderCommon.h; sourceTree = "<group>"; };
+		0DC3CAD82EE102AD001B0F91 /* SingleStageRenderPath.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SingleStageRenderPath.metal; sourceTree = "<group>"; };
+		0DC3CAD92EE102AD001B0F91 /* SplatBuffer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplatBuffer.swift; sourceTree = "<group>"; };
+		0DC3CADA2EE102AD001B0F91 /* SplatProcessing.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SplatProcessing.h; sourceTree = "<group>"; };
+		0DC3CADB2EE102AD001B0F91 /* SplatProcessing.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = SplatProcessing.metal; sourceTree = "<group>"; };
 		0DDBAEDE2E4A8EB400074FFE /* CpuParticle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CpuParticle.swift; sourceTree = "<group>"; };
 		0DDBAEDF2E4A8EB400074FFE /* ExportController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportController.swift; sourceTree = "<group>"; };
 		0DDBAEE02E4A8EB400074FFE /* Helpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Helpers.swift; sourceTree = "<group>"; };
@@ -190,6 +200,12 @@
 		0DC3CAC32EDEB047001B0F91 /* GSplat */ = {
 			isa = PBXGroup;
 			children = (
+				0DC3CAD62EE102AD001B0F91 /* MultiStageRenderPath.metal */,
+				0DC3CAD72EE102AD001B0F91 /* ShaderCommon.h */,
+				0DC3CAD82EE102AD001B0F91 /* SingleStageRenderPath.metal */,
+				0DC3CAD92EE102AD001B0F91 /* SplatBuffer.swift */,
+				0DC3CADA2EE102AD001B0F91 /* SplatProcessing.h */,
+				0DC3CADB2EE102AD001B0F91 /* SplatProcessing.metal */,
 				0DC3CACA2EE0E317001B0F91 /* bitonic_sort.metal */,
 				0DC3CACB2EE0E317001B0F91 /* BitonicSort.swift */,
 				0DC3CACC2EE0E317001B0F91 /* GaussianSplat.swift */,
@@ -369,6 +385,10 @@
 				0D43BE492ED55AF90060CF78 /* ExportLogic.swift in Sources */,
 				0DDBAEFB2E4A8EEB00074FFE /* XError.swift in Sources */,
 				0DDBAEFC2E4A8EEB00074FFE /* AppDelegate.swift in Sources */,
+				0DC3CADC2EE102AD001B0F91 /* MultiStageRenderPath.metal in Sources */,
+				0DC3CADD2EE102AD001B0F91 /* SingleStageRenderPath.metal in Sources */,
+				0DC3CADE2EE102AD001B0F91 /* SplatBuffer.swift in Sources */,
+				0DC3CADF2EE102AD001B0F91 /* SplatProcessing.metal in Sources */,
 				0D0F84DF2EA7F36300764C00 /* PromptDA_vits_518x518_prompt192x256.mlpackage in Sources */,
 				0D0F84E12EA7FDDF00764C00 /* PromptDA_vits_518x518_prompt256x192.mlpackage in Sources */,
 				0DDBAEFD2E4A8EEB00074FFE /* Helpers.swift in Sources */,

@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IOSSplat}/MetalSplatter",
+            "name": "Debug SplatConverter (MetalSplatter)",
+            "target": "SplatConverter",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug SplatConverter (MetalSplatter)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:IOSSplat}/MetalSplatter",
+            "name": "Release SplatConverter (MetalSplatter)",
+            "target": "SplatConverter",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release SplatConverter (MetalSplatter)"
+        }
+    ]
+}

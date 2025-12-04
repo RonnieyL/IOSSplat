@@ -394,15 +394,13 @@ final class Renderer {
             // The GaussianSplatRenderer will handle the case of no points gracefully
             renderEncoder.endEncoding()
             
-            let splatPointCount = splatting.getPointCount()
-            print("[Renderer] GaussianSplatRenderer has \(splatPointCount) points before draw()")
-            
             if let drawable = renderDestination.currentDrawable {
-                let cameraTransform = currentFrame.camera.transform
+                // Use viewMatrix(for: orientation) to properly handle portrait mode
+                let viewMatrix = currentFrame.camera.viewMatrix(for: orientation)
                 let projectionMatrix = currentFrame.camera.projectionMatrix(for: orientation, viewportSize: viewportSize, zNear: 0.001, zFar: 1000)
                 
                 splatting.draw(commandBuffer: commandBuffer,
-                               viewMatrix: cameraTransform.inverse,
+                               viewMatrix: viewMatrix,
                                projectionMatrix: projectionMatrix,
                                viewport: viewportSize,
                                outputTexture: drawable.texture)
@@ -468,23 +466,38 @@ final class Renderer {
 
         var retainingTextures = [capturedImageTextureY, capturedImageTextureCbCr, depthTexture, confidenceTexture]
         
-        // Capture camera position for use in the completion handler
-        let cameraPosition = frame.camera.transform.columns.3
+        // Regenerate grid points buffer if we have new probability samples (MVS mode)
+        if depthSource == .mvs || promptDAEngine != nil {
+            let newPoints = makeGridPoints(frame: frame)
+            print("   • Regenerating grid points buffer: \(newPoints.count) LoG-sampled points")
+            gridPointsBuffer = MetalBuffer<Float2>(device: device,
+                                                  array: newPoints,
+                                                  index: kGridPoints.rawValue, options: [])
+        }
+        
+        // Capture values BEFORE GPU work for the completion handler
+        let startIndex = currentPointIndex
+        let expectedCount = gridPointsBuffer.count
 
-        commandBuffer.addCompletedHandler { buffer in
+        commandBuffer.addCompletedHandler { [weak self] buffer in
+            guard let self = self else { return }
             retainingTextures.removeAll()
-            // copy gpu point buffer to cpu
-            var i = self.cpuParticlesBuffer.count
             
-            // Temporary arrays for new points
+            // Read points from the known range that was just written
             var newPoints: [SIMD3<Float>] = []
             var newColors: [SIMD3<Float>] = []
-            var newCovariances: [SIMD3<Float>] = []
             
-            while (i < self.maxPoints && self.particlesBuffer[i].position != simd_float3(0.0,0.0,0.0)) {
+            for offset in 0..<expectedCount {
+                let i = (startIndex + offset) % self.maxPoints
                 let position = self.particlesBuffer[i].position
                 let color = self.particlesBuffer[i].color
                 let confidence = self.particlesBuffer[i].confidence
+                
+                // Skip zero positions (invalid points)
+                if position == simd_float3(0.0, 0.0, 0.0) {
+                    continue
+                }
+                
                 if confidence == 2 { self.highConfCount += 1 }
                 self.cpuParticlesBuffer.append(
                     CPUParticle(position: position,
@@ -494,39 +507,12 @@ final class Renderer {
                 // Collect for Gaussian Splatting
                 newPoints.append(position)
                 newColors.append(color)
-                
-                // Compute depth-based scale for Gaussian covariance
-                // Points further away get larger splats to maintain visual coverage
-                let dx = position.x - cameraPosition.x
-                let dy = position.y - cameraPosition.y
-                let dz = position.z - cameraPosition.z
-                let depth = sqrt(dx*dx + dy*dy + dz*dz)
-                
-                // Base scale proportional to depth (roughly 1cm at 1m distance)
-                // Adjust confidence: high confidence = smaller splats, low = larger
-                let confidenceFactor: Float = confidence == 2 ? 1.0 : (confidence == 1 ? 1.5 : 2.0)
-                let baseScale: Float = 0.005 * depth * confidenceFactor // 0.5% of depth
-                let scale = SIMD3<Float>(baseScale, baseScale, baseScale)
-                newCovariances.append(scale)
-                
-                i += 1
             }
             
             // Add to Gaussian Splatting if active
-            print("[Renderer] Completion handler: collected \(newPoints.count) new points, isGaussianSplattingEnabled=\(self.isGaussianSplattingEnabled), splatRenderer exists=\(self.gaussianSplatRenderer != nil)")
             if self.isGaussianSplattingEnabled, let splatting = self.gaussianSplatRenderer, !newPoints.isEmpty {
-                print("[Renderer] Calling addPoints with \(newPoints.count) points")
-                splatting.addPoints(positions: newPoints, colors: newColors, covariances: newCovariances)
+                splatting.addPoints(positions: newPoints, colors: newColors)
             }
-        }
-        
-        // Regenerate grid points buffer if we have new probability samples (MVS mode)
-        if depthSource == .mvs || promptDAEngine != nil {
-            let newPoints = makeGridPoints(frame: frame)
-            print("   • Regenerating grid points buffer: \(newPoints.count) LoG-sampled points")
-            gridPointsBuffer = MetalBuffer<Float2>(device: device,
-                                                  array: newPoints,
-                                                  index: kGridPoints.rawValue, options: [])
         }
 
         renderEncoder.setDepthStencilState(relaxedStencilState)
