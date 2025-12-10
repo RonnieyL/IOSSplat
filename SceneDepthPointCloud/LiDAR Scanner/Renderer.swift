@@ -100,9 +100,30 @@ final class Renderer {
     var atomicCounterBuffer: MTLBuffer?
     var probabilityBuffer: MTLBuffer?
     
-    // Gaussian Splatting
+    // Gaussian Splatting - MetalSplatter (old, keeping for fallback)
     private var gaussianSplatRenderer: GaussianSplatRenderer?
+
+    // OpenSplat Renderer (new, advanced tile-based)
+    private var openSplatRenderer: OpenSplatRenderer?
     var isGaussianSplattingEnabled = true  // Enable by default for testing
+    var useOpenSplatRenderer = true  // Toggle for migration - ENABLED FOR TESTING
+
+    // Debug tracking for splatting pipeline
+    private var splatRenderFrameCount: Int = 0
+    private var splatUpdateFrameCount: Int = 0
+    private var lastSplatDebugTime: TimeInterval = 0
+
+    // OpenSplat Gaussian data buffers
+    private var gaussianMeansBuffer: MTLBuffer?      // SIMD3<Float> positions [N]
+    private var gaussianScalesBuffer: MTLBuffer?     // SIMD3<Float> scale per gaussian [N]
+    private var gaussianQuatsBuffer: MTLBuffer?      // SIMD4<Float> rotation quaternion [N]
+    private var gaussianColorsBuffer: MTLBuffer?     // SIMD3<Float> RGB [N]
+    private var gaussianOpacitiesBuffer: MTLBuffer?  // Float opacity [N]
+    private var currentGaussianCount: Int = 0
+    private let maxGaussians = 500000  // Maximum Gaussians to store
+
+    // Debug: Track buffer health
+    private var bufferAllocationSuccessful = false
     
     // Multi-buffer rendering pipeline
     private let inFlightSemaphore: DispatchSemaphore
@@ -173,8 +194,57 @@ final class Renderer {
         self.commandQueue = device.makeCommandQueue()!
         
         // Initialize Gaussian Splatting
+        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("✨ Initializing Gaussian Splatting Renderer")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         self.gaussianSplatRenderer = GaussianSplatRenderer(device: device)
-        
+        if gaussianSplatRenderer != nil {
+            print("✅ GaussianSplatRenderer (MetalSplatter) initialized")
+            print("   • Mode: Tile-based splatting (simple)")
+            print("   • Status: ENABLED (fallback)")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        } else {
+            print("❌ GaussianSplatRenderer initialization FAILED")
+            print("   • Falling back to point cloud rendering")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        }
+
+        // Initialize OpenSplat Renderer (Step 2 & 3)
+        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("🎯 STEP 2 & 3: Initializing OpenSplatRenderer")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        do {
+            let startTime = CACurrentMediaTime()
+            self.openSplatRenderer = try OpenSplatRenderer(device: device)
+            let elapsed = CACurrentMediaTime() - startTime
+
+            print("✅ OpenSplatRenderer initialized successfully")
+            print("   • Init time: \(String(format: "%.3f", elapsed))s")
+            print("   • Mode: Tile-based GPU rasterization")
+            print("   • Features: 16x16 tiles, depth sorting, SH support")
+            print("   • Status: INITIALIZED (inactive until Step 7)")
+
+            // Validation: Check that pipeline states were created
+            if self.openSplatRenderer != nil {
+                print("   ✓ Renderer instance created")
+                print("   ✓ Metal pipelines loaded")
+                print("   ✓ GPU utilities initialized")
+            }
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        } catch {
+            print("❌ OpenSplatRenderer initialization FAILED")
+            print("   • Error: \(error.localizedDescription)")
+            if let nsError = error as NSError? {
+                print("   • Domain: \(nsError.domain)")
+                print("   • Code: \(nsError.code)")
+                if let reason = nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String {
+                    print("   • Reason: \(reason)")
+                }
+            }
+            print("   • Fallback: Will use MetalSplatter instead")
+            print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+        }
+
         // initialize our buffers
         for _ in 0 ..< maxInFlightBuffers {
             rgbUniformsBuffers.append(.init(device: device, count: 1, index: 0))
@@ -212,6 +282,19 @@ final class Renderer {
             }
         }
         self.loadSavedClouds()
+
+        // Initialize OpenSplat Gaussian buffers (after all properties initialized)
+        print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("📦 STEP 1: Allocating OpenSplat Gaussian Buffers")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        bufferAllocationSuccessful = allocateGaussianBuffers()
+        if bufferAllocationSuccessful {
+            print("✅ All Gaussian buffers allocated successfully")
+            validateGaussianBuffers()
+        } else {
+            print("❌ Gaussian buffer allocation FAILED")
+        }
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
     }
 
     func drawRectResized(size: CGSize) {
@@ -393,19 +476,142 @@ final class Renderer {
             // For now, always use the Gaussian path when enabled
             // The GaussianSplatRenderer will handle the case of no points gracefully
             renderEncoder.endEncoding()
-            
+
+            splatRenderFrameCount += 1
+            let currentTime = CACurrentMediaTime()
+            let shouldPrintDebug = (currentTime - lastSplatDebugTime) >= 2.0 // Debug every 2 seconds
+
+            if shouldPrintDebug {
+                print("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                print("🎨 GAUSSIAN SPLATTING PIPELINE DEBUG")
+                print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                print("📊 Stats:")
+                print("   • Total splats: \(splatting.splatCount)")
+                print("   • Render frames: \(splatRenderFrameCount)")
+                print("   • Update frames: \(splatUpdateFrameCount)")
+                print("   • Viewport: \(Int(viewportSize.width))×\(Int(viewportSize.height))")
+                lastSplatDebugTime = currentTime
+            }
+
             if let drawable = renderDestination.currentDrawable {
                 // Use viewMatrix(for: orientation) to properly handle portrait mode
                 let viewMatrix = currentFrame.camera.viewMatrix(for: orientation)
                 let projectionMatrix = currentFrame.camera.projectionMatrix(for: orientation, viewportSize: viewportSize, zNear: 0.001, zFar: 1000)
-                
+
+                if shouldPrintDebug {
+                    print("🎥 Camera:")
+                    print("   • Position: (\(String(format: "%.2f", currentFrame.camera.transform.columns.3.x)), \(String(format: "%.2f", currentFrame.camera.transform.columns.3.y)), \(String(format: "%.2f", currentFrame.camera.transform.columns.3.z)))")
+                    print("   • Orientation: \(orientation)")
+                    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+                }
+
+                // STEP 7A: Try OpenSplat rendering (to temp texture, not displayed yet)
+                if self.useOpenSplatRenderer,
+                   let openSplat = self.openSplatRenderer,
+                   let meansBuffer = self.gaussianMeansBuffer,
+                   let scalesBuffer = self.gaussianScalesBuffer,
+                   let quatsBuffer = self.gaussianQuatsBuffer,
+                   let colorsBuffer = self.gaussianColorsBuffer,
+                   let opacitiesBuffer = self.gaussianOpacitiesBuffer,
+                   self.currentGaussianCount > 0 {
+
+                    print("🎬 [Step 7A] Attempting OpenSplat render...")
+                    print("   • Gaussian count: \(self.currentGaussianCount)")
+
+                    // Extract camera parameters
+                    let camParams = extractCameraParameters(from: currentFrame)
+                    print("   • Camera: fx=\(String(format: "%.1f", camParams.fx)), fy=\(String(format: "%.1f", camParams.fy))")
+                    print("   • Image size: \(camParams.imgWidth)×\(camParams.imgHeight)")
+
+                    // Create temporary output texture (same format as drawable)
+                    let outputDesc = MTLTextureDescriptor.texture2DDescriptor(
+                        pixelFormat: drawable.texture.pixelFormat,
+                        width: drawable.texture.width,
+                        height: drawable.texture.height,
+                        mipmapped: false
+                    )
+                    outputDesc.usage = [.renderTarget, .shaderRead]
+                    outputDesc.storageMode = .private
+
+                    if let tempTexture = self.device.makeTexture(descriptor: outputDesc) {
+                        print("   • Temp texture created: \(tempTexture.width)×\(tempTexture.height)")
+
+                        // DEBUG: Check Gaussian positions before rendering
+                        let meansPtr = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: self.currentGaussianCount)
+                        let colorsPtr = colorsBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: self.currentGaussianCount)
+
+                        print("   🔍 DEBUG - First 5 Gaussians:")
+                        for i in 0..<min(5, self.currentGaussianCount) {
+                            let pos = meansPtr[i]
+                            let col = colorsPtr[i]
+                            print("      [\(i)] pos=(\(String(format: "%.3f", pos.x)), \(String(format: "%.3f", pos.y)), \(String(format: "%.3f", pos.z))), color=(\(String(format: "%.2f", col.x)), \(String(format: "%.2f", col.y)), \(String(format: "%.2f", col.z)))")
+                        }
+
+                        // Check camera position
+                        let camPos = currentFrame.camera.transform.columns.3
+                        print("   🔍 Camera position: (\(String(format: "%.3f", camPos.x)), \(String(format: "%.3f", camPos.y)), \(String(format: "%.3f", camPos.z)))")
+
+                        // Calculate distance to first Gaussian
+                        if self.currentGaussianCount > 0 {
+                            let firstPos = meansPtr[0]
+                            let dist = simd_distance(SIMD3<Float>(camPos.x, camPos.y, camPos.z), firstPos)
+                            print("   🔍 Distance to first Gaussian: \(String(format: "%.3f", dist))m")
+                            
+                            // Verify view space depth (using ARKit matrices directly)
+                            let viewMatrix = camParams.viewMatrix
+                            let firstGaussianHomo = SIMD4<Float>(firstPos.x, firstPos.y, firstPos.z, 1.0)
+                            let viewSpace = viewMatrix * firstGaussianHomo
+                            print("   🔍 First Gaussian in view space: Z=\(String(format: "%.3f", viewSpace.z)) (negative OK - kernel uses abs())")
+                        }
+
+                        do {
+                            let renderStart = CACurrentMediaTime()
+
+                            try openSplat.render(
+                                gaussianMeans: meansBuffer,
+                                gaussianScales: scalesBuffer,
+                                gaussianQuats: quatsBuffer,
+                                gaussianColors: colorsBuffer,
+                                gaussianOpacities: opacitiesBuffer,
+                                numGaussians: self.currentGaussianCount,
+                                viewMatrix: camParams.viewMatrix,
+                                projMatrix: camParams.projMatrix,
+                                fx: camParams.fx,
+                                fy: camParams.fy,
+                                cx: camParams.cx,
+                                cy: camParams.cy,
+                                imgWidth: camParams.imgWidth,
+                                imgHeight: camParams.imgHeight,
+                                outputTexture: tempTexture,
+                                globalScale: 1.0,
+                                clipThreshold: -1000.0,  // Negative for ARKit's -Z forward convention
+                                background: SIMD3<Float>(0, 0, 0)
+                            )
+
+                            let renderTime = CACurrentMediaTime() - renderStart
+                            print("   ✅ OpenSplat render SUCCESS!")
+                            print("   • Render time: \(String(format: "%.3f", renderTime))s (\(String(format: "%.1f", 1.0/renderTime)) FPS)")
+                            print("   • Output texture: \(tempTexture.width)×\(tempTexture.height)")
+                            print("   ⚠️ NOTE: Rendering to temp texture, NOT displayed yet (Step 7B)")
+
+                        } catch {
+                            print("   ❌ OpenSplat render FAILED: \(error.localizedDescription)")
+                        }
+                    } else {
+                        print("   ❌ Failed to create temp output texture")
+                    }
+                } else if self.useOpenSplatRenderer {
+                    print("   ⚠️ OpenSplat skipped: count=\(self.currentGaussianCount), renderer=\(self.openSplatRenderer != nil)")
+                }
+
+                // Still render with MetalSplatter for now (fallback/comparison)
                 splatting.draw(commandBuffer: commandBuffer,
                                viewMatrix: viewMatrix,
                                projectionMatrix: projectionMatrix,
                                viewport: viewportSize,
                                outputTexture: drawable.texture)
             }
-            
+
             commandBuffer.present(renderDestination.currentDrawable!)
             commandBuffer.commit()
         } else {
@@ -492,18 +698,27 @@ final class Renderer {
                 let position = self.particlesBuffer[i].position
                 let color = self.particlesBuffer[i].color
                 let confidence = self.particlesBuffer[i].confidence
-                
+
                 // Skip zero positions (invalid points)
                 if position == simd_float3(0.0, 0.0, 0.0) {
                     continue
                 }
-                
+
                 if confidence == 2 { self.highConfCount += 1 }
                 self.cpuParticlesBuffer.append(
                     CPUParticle(position: position,
                                 color: color,
                                 confidence: confidence))
-                
+
+                // DEBUG: Check position values during capture
+                if offset < 3 && newPoints.isEmpty, let frame = self.session.currentFrame {
+                    print("🔍 Captured point[\(offset)]: pos=(\(String(format: "%.3f", position.x)), \(String(format: "%.3f", position.y)), \(String(format: "%.3f", position.z)))")
+                    let camPos = frame.camera.transform.columns.3
+                    print("   Camera at capture: (\(String(format: "%.3f", camPos.x)), \(String(format: "%.3f", camPos.y)), \(String(format: "%.3f", camPos.z)))")
+                    let dist = simd_distance(SIMD3<Float>(camPos.x, camPos.y, camPos.z), position)
+                    print("   Distance: \(String(format: "%.3f", dist))m")
+                }
+
                 // Collect for Gaussian Splatting
                 newPoints.append(position)
                 newColors.append(color)
@@ -511,7 +726,44 @@ final class Renderer {
             
             // Add to Gaussian Splatting if active
             if self.isGaussianSplattingEnabled, let splatting = self.gaussianSplatRenderer, !newPoints.isEmpty {
+                let beforeCount = splatting.splatCount
                 splatting.addPoints(positions: newPoints, colors: newColors)
+                let afterCount = splatting.splatCount
+                splatUpdateFrameCount += 1
+
+                print("✨ Splat Update:")
+                print("   • Added: \(newPoints.count) new splats")
+                print("   • Total: \(beforeCount) → \(afterCount)")
+                print("   • Update frame: #\(splatUpdateFrameCount)")
+            }
+
+            // Add to OpenSplat Gaussian buffers if using OpenSplat renderer
+            print("🔍 DEBUG: useOpenSplatRenderer=\(self.useOpenSplatRenderer), newPoints.count=\(newPoints.count)")
+            if self.useOpenSplatRenderer, !newPoints.isEmpty {
+                let beforeCount = self.currentGaussianCount
+
+                // Convert points to Gaussians and add to buffers
+                if let addedCount = self.convertPointsToGaussians(
+                    positions: newPoints,
+                    colors: newColors,
+                    startIndex: self.currentGaussianCount
+                ) {
+                    self.currentGaussianCount += addedCount
+
+                    // Validate the newly added range
+                    let validationPassed = self.validateGaussianRange(
+                        startIndex: beforeCount,
+                        count: addedCount
+                    )
+
+                    print("🎯 OpenSplat Update:")
+                    print("   • Added: \(addedCount) Gaussians")
+                    print("   • Total: \(beforeCount) → \(self.currentGaussianCount)")
+                    print("   • Validation: \(validationPassed ? "✅ PASSED" : "⚠️ FAILED")")
+                    print("   • Update frame: #\(splatUpdateFrameCount)")
+                } else {
+                    print("❌ OpenSplat Update FAILED - could not convert points to Gaussians")
+                }
             }
         }
 
@@ -545,6 +797,337 @@ extension Renderer {
     }
     func getCpuParticles() -> Array<CPUParticle> {
         return self.cpuParticlesBuffer
+    }
+
+    // MARK: - OpenSplat Buffer Management (Step 1)
+
+    /// Allocate Metal buffers for Gaussian data
+    /// Returns: true if all buffers allocated successfully, false otherwise
+    private func allocateGaussianBuffers() -> Bool {
+        print("📦 Allocating buffers for \(maxGaussians) Gaussians...")
+
+        // Calculate memory requirements
+        let meansSize = maxGaussians * MemoryLayout<SIMD3<Float>>.stride
+        let scalesSize = maxGaussians * MemoryLayout<SIMD3<Float>>.stride
+        let quatsSize = maxGaussians * MemoryLayout<SIMD4<Float>>.stride
+        let colorsSize = maxGaussians * MemoryLayout<SIMD3<Float>>.stride
+        let opacitiesSize = maxGaussians * MemoryLayout<Float>.stride
+        let totalMB = Double(meansSize + scalesSize + quatsSize + colorsSize + opacitiesSize) / (1024 * 1024)
+
+        print("   • Memory required: \(String(format: "%.2f", totalMB)) MB")
+        print("   • Buffer breakdown:")
+        print("      - Means:     \(meansSize / 1024) KB")
+        print("      - Scales:    \(scalesSize / 1024) KB")
+        print("      - Quats:     \(quatsSize / 1024) KB")
+        print("      - Colors:    \(colorsSize / 1024) KB")
+        print("      - Opacities: \(opacitiesSize / 1024) KB")
+
+        // Allocate buffers with .storageModeShared for CPU access (debugging)
+        gaussianMeansBuffer = device.makeBuffer(
+            length: meansSize,
+            options: .storageModeShared
+        )
+        guard gaussianMeansBuffer != nil else {
+            print("   ❌ Failed to allocate means buffer")
+            return false
+        }
+        print("   ✓ Means buffer allocated")
+
+        gaussianScalesBuffer = device.makeBuffer(
+            length: scalesSize,
+            options: .storageModeShared
+        )
+        guard gaussianScalesBuffer != nil else {
+            print("   ❌ Failed to allocate scales buffer")
+            return false
+        }
+        print("   ✓ Scales buffer allocated")
+
+        gaussianQuatsBuffer = device.makeBuffer(
+            length: quatsSize,
+            options: .storageModeShared
+        )
+        guard gaussianQuatsBuffer != nil else {
+            print("   ❌ Failed to allocate quats buffer")
+            return false
+        }
+        print("   ✓ Quats buffer allocated")
+
+        gaussianColorsBuffer = device.makeBuffer(
+            length: colorsSize,
+            options: .storageModeShared
+        )
+        guard gaussianColorsBuffer != nil else {
+            print("   ❌ Failed to allocate colors buffer")
+            return false
+        }
+        print("   ✓ Colors buffer allocated")
+
+        gaussianOpacitiesBuffer = device.makeBuffer(
+            length: opacitiesSize,
+            options: .storageModeShared
+        )
+        guard gaussianOpacitiesBuffer != nil else {
+            print("   ❌ Failed to allocate opacities buffer")
+            return false
+        }
+        print("   ✓ Opacities buffer allocated")
+
+        return true
+    }
+
+    /// Validate buffer integrity and properties
+    private func validateGaussianBuffers() {
+        print("\n🔍 VALIDATION: Checking buffer integrity...")
+
+        var validationPassed = true
+
+        // Check buffer existence
+        guard let meansBuffer = gaussianMeansBuffer,
+              let scalesBuffer = gaussianScalesBuffer,
+              let quatsBuffer = gaussianQuatsBuffer,
+              let colorsBuffer = gaussianColorsBuffer,
+              let opacitiesBuffer = gaussianOpacitiesBuffer else {
+            print("   ❌ One or more buffers are nil")
+            validationPassed = false
+            return
+        }
+
+        // Check buffer lengths
+        let expectedMeansSize = maxGaussians * MemoryLayout<SIMD3<Float>>.stride
+        let expectedScalesSize = maxGaussians * MemoryLayout<SIMD3<Float>>.stride
+        let expectedQuatsSize = maxGaussians * MemoryLayout<SIMD4<Float>>.stride
+        let expectedColorsSize = maxGaussians * MemoryLayout<SIMD3<Float>>.stride
+        let expectedOpacitiesSize = maxGaussians * MemoryLayout<Float>.stride
+
+        if meansBuffer.length != expectedMeansSize {
+            print("   ❌ Means buffer size mismatch: \(meansBuffer.length) vs \(expectedMeansSize)")
+            validationPassed = false
+        }
+        if scalesBuffer.length != expectedScalesSize {
+            print("   ❌ Scales buffer size mismatch")
+            validationPassed = false
+        }
+        if quatsBuffer.length != expectedQuatsSize {
+            print("   ❌ Quats buffer size mismatch")
+            validationPassed = false
+        }
+        if colorsBuffer.length != expectedColorsSize {
+            print("   ❌ Colors buffer size mismatch")
+            validationPassed = false
+        }
+        if opacitiesBuffer.length != expectedOpacitiesSize {
+            print("   ❌ Opacities buffer size mismatch")
+            validationPassed = false
+        }
+
+        // Test write/read access (write sentinel values)
+        let meansPtr = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: 1)
+        meansPtr[0] = SIMD3<Float>(1.0, 2.0, 3.0)
+        if meansPtr[0] == SIMD3<Float>(1.0, 2.0, 3.0) {
+            print("   ✓ Means buffer read/write verified")
+        } else {
+            print("   ❌ Means buffer read/write FAILED")
+            validationPassed = false
+        }
+
+        let scalesPtr = scalesBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: 1)
+        scalesPtr[0] = SIMD3<Float>(0.5, 0.5, 0.5)
+        if scalesPtr[0] == SIMD3<Float>(0.5, 0.5, 0.5) {
+            print("   ✓ Scales buffer read/write verified")
+        } else {
+            print("   ❌ Scales buffer read/write FAILED")
+            validationPassed = false
+        }
+
+        let quatsPtr = quatsBuffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: 1)
+        quatsPtr[0] = SIMD4<Float>(0, 0, 0, 1)
+        if quatsPtr[0] == SIMD4<Float>(0, 0, 0, 1) {
+            print("   ✓ Quats buffer read/write verified")
+        } else {
+            print("   ❌ Quats buffer read/write FAILED")
+            validationPassed = false
+        }
+
+        if validationPassed {
+            print("   ✅ All buffers validated successfully!")
+        } else {
+            print("   ⚠️ Buffer validation encountered issues")
+        }
+    }
+
+    // MARK: - Gaussian Conversion Helper
+
+    /// Converts simple point cloud data (positions + colors) to full Gaussian parameters
+    /// - Parameters:
+    ///   - positions: Array of 3D positions
+    ///   - colors: Array of RGB colors
+    ///   - startIndex: Starting index in the Gaussian buffers to write to
+    /// - Returns: Number of Gaussians successfully added, or nil if validation fails
+    private func convertPointsToGaussians(
+        positions: [SIMD3<Float>],
+        colors: [SIMD3<Float>],
+        startIndex: Int = 0
+    ) -> Int? {
+
+        guard positions.count == colors.count else {
+            print("❌ convertPointsToGaussians: position/color count mismatch")
+            return nil
+        }
+
+        guard startIndex + positions.count <= maxGaussians else {
+            print("❌ convertPointsToGaussians: would exceed maxGaussians (\(maxGaussians))")
+            return nil
+        }
+
+        guard let meansBuffer = gaussianMeansBuffer,
+              let scalesBuffer = gaussianScalesBuffer,
+              let quatsBuffer = gaussianQuatsBuffer,
+              let colorsBuffer = gaussianColorsBuffer,
+              let opacitiesBuffer = gaussianOpacitiesBuffer else {
+            print("❌ convertPointsToGaussians: buffers not allocated")
+            return nil
+        }
+
+        let count = positions.count
+        print("🔄 Converting \(count) points to Gaussians starting at index \(startIndex)")
+
+        // Get typed pointers to the buffers
+        let meansPtr = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+        let scalesPtr = scalesBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+        let quatsPtr = quatsBuffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: maxGaussians)
+        let colorsPtr = colorsBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+        let opacitiesPtr = opacitiesBuffer.contents().bindMemory(to: Float.self, capacity: maxGaussians)
+
+        // Default Gaussian parameters for point cloud conversion
+        // These values create small, spherical, fully-opaque Gaussians at each point
+        let defaultScale = SIMD3<Float>(0.05, 0.05, 0.05)  // 50mm radius - increased for visibility (was 5mm)
+        let identityQuat = SIMD4<Float>(0, 0, 0, 1)           // No rotation (identity quaternion)
+        let defaultOpacity: Float = 1.0                        // Fully opaque
+
+        // Convert each point to a Gaussian
+        for i in 0..<count {
+            let idx = startIndex + i
+
+            // means3d = position (direct copy)
+            meansPtr[idx] = positions[i]
+
+            // scales = small default (creates spherical splats)
+            scalesPtr[idx] = defaultScale
+
+            // quats = identity (no rotation)
+            quatsPtr[idx] = identityQuat
+
+            // colors = RGB (direct copy)
+            colorsPtr[idx] = colors[i]
+
+            // opacities = fully opaque
+            opacitiesPtr[idx] = defaultOpacity
+        }
+
+        print("   ✅ Converted \(count) points to Gaussians")
+        print("   • Means: direct position copy")
+        print("   • Scales: uniform \(defaultScale) (5mm radius)")
+        print("   • Quats: identity (no rotation)")
+        print("   • Colors: direct RGB copy")
+        print("   • Opacities: \(defaultOpacity) (fully opaque)")
+
+        return count
+    }
+
+    /// Validation helper - checks if a specific range of Gaussians contains valid data
+    private func validateGaussianRange(startIndex: Int, count: Int) -> Bool {
+        guard let meansBuffer = gaussianMeansBuffer,
+              let colorsBuffer = gaussianColorsBuffer else {
+            return false
+        }
+
+        let meansPtr = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+        let colorsPtr = colorsBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+
+        var validCount = 0
+        for i in 0..<min(count, 10) { // Check first 10 entries
+            let idx = startIndex + i
+            let pos = meansPtr[idx]
+            let col = colorsPtr[idx]
+
+            // Check if position and color are non-zero
+            if pos.x != 0 || pos.y != 0 || pos.z != 0 || col.x != 0 || col.y != 0 || col.z != 0 {
+                validCount += 1
+            }
+        }
+
+        let validRatio = Float(validCount) / Float(min(count, 10))
+        let isValid = validRatio > 0.5 // At least 50% should be non-zero
+
+        if isValid {
+            print("   ✓ Gaussian range validation passed (\(validCount)/\(min(count, 10)) non-zero)")
+        } else {
+            print("   ⚠️ Gaussian range validation: only \(validCount)/\(min(count, 10)) non-zero")
+        }
+
+        return isValid
+    }
+
+    // MARK: - Camera Intrinsics Helper
+
+    /// Extracts camera intrinsics and matrices for OpenSplat rendering
+    /// - Parameter frame: ARFrame containing camera information
+    /// - Returns: Tuple of (fx, fy, cx, cy, viewMatrix, projMatrix, imgWidth, imgHeight)
+    private func extractCameraParameters(from frame: ARFrame) -> (
+        fx: Float,
+        fy: Float,
+        cx: Float,
+        cy: Float,
+        viewMatrix: simd_float4x4,
+        projMatrix: simd_float4x4,
+        imgWidth: Int,
+        imgHeight: Int
+    ) {
+        let camera = frame.camera
+        let intrinsics = camera.intrinsics
+
+        // Extract focal lengths and principal point from intrinsics matrix
+        // Matrix format:
+        // [fx  0  cx]
+        // [ 0 fy  cy]
+        // [ 0  0   1]
+        let fx = intrinsics[0, 0]  // focal length X
+        let fy = intrinsics[1, 1]  // focal length Y
+        let cx = intrinsics[2, 0]  // principal point X
+        let cy = intrinsics[2, 1]  // principal point Y
+
+        // Get view and projection matrices with correct orientation
+        // Keep ARKit matrices as-is - kernel handles -Z forward convention
+        let viewMatrix = camera.viewMatrix(for: orientation)
+        let projMatrix = camera.projectionMatrix(
+            for: orientation,
+            viewportSize: viewportSize,
+            zNear: 0.001,
+            zFar: 1000.0
+        )
+
+        // Get image dimensions
+        let imgWidth: Int
+        let imgHeight: Int
+        if orientation.isPortrait {
+            imgWidth = Int(viewportSize.height)
+            imgHeight = Int(viewportSize.width)
+        } else {
+            imgWidth = Int(viewportSize.width)
+            imgHeight = Int(viewportSize.height)
+        }
+
+        return (
+            fx: fx,
+            fy: fy,
+            cx: cx,
+            cy: cy,
+            viewMatrix: viewMatrix,
+            projMatrix: projMatrix,
+            imgWidth: imgWidth,
+            imgHeight: imgHeight
+        )
     }
 
     func clearParticles() {

@@ -401,7 +401,6 @@
 				0DDBAF022E4A8EEB00074FFE /* MetalBuffer.swift in Sources */,
 				0D0F84DA2EA76B4D00764C00 /* PromptDAEngine.swift in Sources */,
 				0DDBAF032E4A8EEB00074FFE /* PLYFile.swift in Sources */,
-			0DC56FED0A4FF8424789853FC900074FFE /* OpenSplatRenderer.swift in Sources */,
 				0DDBAF042E4A8EEB00074FFE /* OptionSelectionController.swift in Sources */,
 				0DDBAF052E4A8EEB00074FFE /* Renderer.swift in Sources */,
 			);

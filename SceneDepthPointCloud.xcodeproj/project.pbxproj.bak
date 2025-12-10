@@ -229,7 +229,6 @@
 				0DDBAEE12E4A8EB400074FFE /* MainController.swift */,
 				0DDBAEE22E4A8EB400074FFE /* MetalBuffer.swift */,
 				0DDBAEE32E4A8EB400074FFE /* PLYFile.swift */,
-			0D0D4A4A9A9A6349A99EC5256000074FFE /* OpenSplatRenderer.swift */,
 				0DDBAEE42E4A8EB400074FFE /* Renderer.swift */,
 				0DDBAEE52E4A8EB400074FFE /* SaveController.swift */,
 				0DDBAEE62E4A8EB400074FFE /* Shaders.metal */,
@@ -401,7 +400,6 @@
 				0DDBAF022E4A8EEB00074FFE /* MetalBuffer.swift in Sources */,
 				0D0F84DA2EA76B4D00764C00 /* PromptDAEngine.swift in Sources */,
 				0DDBAF032E4A8EEB00074FFE /* PLYFile.swift in Sources */,
-			0DC56FED0A4FF8424789853FC900074FFE /* OpenSplatRenderer.swift in Sources */,
 				0DDBAF042E4A8EEB00074FFE /* OptionSelectionController.swift in Sources */,
 				0DDBAF052E4A8EEB00074FFE /* Renderer.swift in Sources */,
 			);
