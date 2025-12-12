@@ -557,11 +557,18 @@ final class Renderer {
                             let dist = simd_distance(SIMD3<Float>(camPos.x, camPos.y, camPos.z), firstPos)
                             print("   🔍 Distance to first Gaussian: \(String(format: "%.3f", dist))m")
                             
-                            // Verify view space depth (using ARKit matrices directly)
+                            // Verify view space depth with BOTH matrices
                             let viewMatrix = camParams.viewMatrix
+                            let viewMatrixTransposed = camParams.viewMatrix.transpose
                             let firstGaussianHomo = SIMD4<Float>(firstPos.x, firstPos.y, firstPos.z, 1.0)
                             let viewSpace = viewMatrix * firstGaussianHomo
-                            print("   🔍 First Gaussian in view space: Z=\(String(format: "%.3f", viewSpace.z)) (negative OK - kernel uses abs())")
+                            let viewSpaceTransposed = viewMatrixTransposed * firstGaussianHomo
+
+                            print("   🔍 View Matrix [row 2]: [\(String(format: "%.3f", viewMatrix[0][2])), \(String(format: "%.3f", viewMatrix[1][2])), \(String(format: "%.3f", viewMatrix[2][2])), \(String(format: "%.3f", viewMatrix[3][2]))]")
+                            print("   🔍 View space Z with original matrix: \(String(format: "%.3f", viewSpace.z))")
+                            print("   🔍 View space Z with transposed matrix: \(String(format: "%.3f", viewSpaceTransposed.z))")
+                            print("   🔍 View space FULL with original: (\(String(format: "%.3f", viewSpace.x)), \(String(format: "%.3f", viewSpace.y)), \(String(format: "%.3f", viewSpace.z)))")
+                            print("   🔍 Expected: negative Z for visible Gaussians in ARKit")
                         }
 
                         do {
@@ -584,7 +591,7 @@ final class Renderer {
                                 imgHeight: camParams.imgHeight,
                                 outputTexture: tempTexture,
                                 globalScale: 1.0,
-                                clipThreshold: -1000.0,  // Negative for ARKit's -Z forward convention
+                                clipThreshold: -0.01,  // Clip if Z >= -0.01 (within 1cm or behind camera)
                                 background: SIMD3<Float>(0, 0, 0)
                             )
 
@@ -605,6 +612,16 @@ final class Renderer {
                 }
 
                 // Still render with MetalSplatter for now (fallback/comparison)
+                // DEBUG: Test MetalSplatter's view matrix transformation
+                if shouldPrintDebug && self.currentGaussianCount > 0, let meansBuffer = self.gaussianMeansBuffer {
+                    let meansPtr = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+                    let firstPos = meansPtr[0]
+                    let firstGaussianHomo = SIMD4<Float>(firstPos.x, firstPos.y, firstPos.z, 1.0)
+                    let metalSplatterViewSpace = viewMatrix * firstGaussianHomo
+                    print("   🔍 MetalSplatter view space Z: \(String(format: "%.3f", metalSplatterViewSpace.z))")
+                    print("   🔍 MetalSplatter uses SAME viewMatrix as OpenSplat")
+                }
+
                 splatting.draw(commandBuffer: commandBuffer,
                                viewMatrix: viewMatrix,
                                projectionMatrix: projectionMatrix,
@@ -1001,8 +1018,8 @@ extension Renderer {
 
         // Default Gaussian parameters for point cloud conversion
         // These values create small, spherical, fully-opaque Gaussians at each point
-        let defaultScale = SIMD3<Float>(0.05, 0.05, 0.05)  // 50mm radius - increased for visibility (was 5mm)
-        let identityQuat = SIMD4<Float>(0, 0, 0, 1)           // No rotation (identity quaternion)
+        let defaultScale = SIMD3<Float>(0.005, 0.005, 0.005)  // 5mm radius
+        let identityQuat = SIMD4<Float>(1, 0, 0, 0)           // Identity quaternion (w, x, y, z) format
         let defaultOpacity: Float = 1.0                        // Fully opaque
 
         // Convert each point to a Gaussian
@@ -1106,21 +1123,35 @@ extension Renderer {
             zNear: 0.001,
             zFar: 1000.0
         )
+        
+        // DEBUG: Compare focal length derivation methods
+        // MetalSplatter derives from projection matrix: focalX = screenWidth * projMatrix[0][0] / 2
+        // OpenSplat needs to match this to get correct projection
+        let focalFromProj = Float(viewportSize.width) * projMatrix[0][0] / 2.0
+        let focalFromProjY = Float(viewportSize.height) * projMatrix[1][1] / 2.0
+        print("🔍 FOCAL LENGTH COMPARISON:")
+        print("   • fx from intrinsics: \(fx)")
+        print("   • fx from projMatrix: \(focalFromProj) ← Using this for OpenSplat")
+        print("   • projMatrix[0][0]: \(projMatrix[0][0])")
+        print("   • screenWidth: \(viewportSize.width)")
+        
+        // Use projection-matrix-derived focal lengths to match MetalSplatter's behavior
+        let fxAdjusted = focalFromProj
+        let fyAdjusted = focalFromProjY
 
-        // Get image dimensions
-        let imgWidth: Int
-        let imgHeight: Int
-        if orientation.isPortrait {
-            imgWidth = Int(viewportSize.height)
-            imgHeight = Int(viewportSize.width)
-        } else {
-            imgWidth = Int(viewportSize.width)
-            imgHeight = Int(viewportSize.height)
-        }
+        // Get image dimensions - DO NOT swap for orientation
+        // viewportSize already represents the actual render target dimensions
+        // The view/proj matrices already account for orientation
+        let imgWidth = Int(viewportSize.width)
+        let imgHeight = Int(viewportSize.height)
+        
+        print("   • orientation: \(orientation.isPortrait ? "portrait" : "landscape")")
+        print("   • imgWidth: \(imgWidth), imgHeight: \(imgHeight)")
+        print("   • viewportSize: \(viewportSize.width) × \(viewportSize.height)")
 
         return (
-            fx: fx,
-            fy: fy,
+            fx: fxAdjusted,  // Use projection-derived focal lengths
+            fy: fyAdjusted,
             cx: cx,
             cy: cy,
             viewMatrix: viewMatrix,

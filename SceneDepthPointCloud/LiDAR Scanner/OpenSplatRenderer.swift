@@ -84,9 +84,9 @@ class OpenSplatRenderer {
             print("   ✓ rasterize_backward_kernel pipeline created")
 
             self.projectGaussiansForwardPipeline = try Self.createPipelineState(
-                device: device, library: library, functionName: "project_gaussians_forward_kernel"
+                device: device, library: library, functionName: "project_gaussians_forward_kernel_OPENSPLAT"
             )
-            print("   ✓ project_gaussians_forward_kernel pipeline created")
+            print("   ✓ project_gaussians_forward_kernel_OPENSPLAT pipeline created")
 
             self.projectGaussiansBackwardPipeline = try Self.createPipelineState(
                 device: device, library: library, functionName: "project_gaussians_backward_kernel"
@@ -191,6 +191,95 @@ class OpenSplatRenderer {
             clipThreshold: clipThreshold
         )
 
+        // Commit and wait to read back debug info
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        // Read back debug counters
+        let countersPtr = stage1Outputs.debugCounters.contents().bindMemory(to: Int32.self, capacity: 5)
+        let counter0 = countersPtr[0]
+        let counter1 = countersPtr[1]
+        let counter2 = countersPtr[2]
+        let zeroTiles = countersPtr[3]
+        let success = countersPtr[4]
+
+        print("   � DEBUG MAGIC NUMBERS:")
+        print("      • counter[0] = \(counter0) (expect 77777=started, 99999=processing, or count)")
+        print("      • counter[1] = \(counter1) (expect num_points value)")
+        print("      • counter[2] = \(counter2) (expect 88888 if thread0 exited early)")
+        
+        if counter0 == 77777 {
+            print("      ✅ Kernel STARTED but didn't process! (thread 0 wrote 77777)")
+            print("      📍 num_points received by GPU: \(counter1)")
+            if counter2 == 88888 {
+                print("      ⚠️ Thread 0 EXITED EARLY at idx >= num_points check!")
+            }
+        } else if counter0 == 99999 {
+            print("      ✅ Kernel PROCESSING! (thread 0 wrote 99999)")
+        } else {
+            print("      ℹ️ Processed count: \(counter0)")
+        }
+        
+        print("   📊 PROJECTION FAILURE BREAKDOWN:")
+        print("      • Zero tile area: \(zeroTiles)")
+        print("      • ✅ SUCCESS: \(success)")
+
+        // Read back projection results for debugging
+        let radiiPtr = stage1Outputs.radii.contents().bindMemory(to: Int32.self, capacity: numGaussians)
+        let depthsPtr = stage1Outputs.depths.contents().bindMemory(to: Float.self, capacity: numGaussians)
+        let numTilesHitPtr = stage1Outputs.numTilesHit.contents().bindMemory(to: Int32.self, capacity: numGaussians)
+
+        // Debug: Find ALL successful Gaussians
+        var successIndices: [Int] = []
+        for i in 0..<numGaussians {
+            if radiiPtr[i] > 0 {
+                successIndices.append(i)
+                if successIndices.count >= 10 { break }
+            }
+        }
+
+        if !successIndices.isEmpty {
+            let firstIdx = successIndices[0]
+            print("   🔍 DEBUG - Found successful Gaussians at indices: \(successIndices)")
+            print("   🔍 DEBUG - First SUCCESS (index \(firstIdx)):")
+            let cov3dPtr = stage1Outputs.cov3d.contents().bindMemory(to: Float.self, capacity: numGaussians * 6)
+            let cov3dOffset = firstIdx * 6
+            print("      • Radius: \(radiiPtr[firstIdx]) px, Depth: \(String(format: "%.3f", depthsPtr[firstIdx])), Tiles: \(numTilesHitPtr[firstIdx])")
+            print("      • Cov3D: [\(String(format: "%.6f", cov3dPtr[cov3dOffset+0]))  \(String(format: "%.6f", cov3dPtr[cov3dOffset+1]))  \(String(format: "%.6f", cov3dPtr[cov3dOffset+2]))]")
+            print("               [\(String(format: "%.6f", cov3dPtr[cov3dOffset+1]))  \(String(format: "%.6f", cov3dPtr[cov3dOffset+3]))  \(String(format: "%.6f", cov3dPtr[cov3dOffset+4]))]")
+            print("               [\(String(format: "%.6f", cov3dPtr[cov3dOffset+2]))  \(String(format: "%.6f", cov3dPtr[cov3dOffset+4]))  \(String(format: "%.6f", cov3dPtr[cov3dOffset+5]))]")
+
+            // Read debug values written by any successful Gaussian
+            if firstIdx == 2357 || firstIdx == 2513 || firstIdx == 2561 || firstIdx < 10 {
+                let debugOffset = numGaussians * 6
+                print("   🔍 COVARIANCE CALCULATION DEBUG (Gaussian \(firstIdx)):")
+                print("      • scale: (\(String(format: "%.6f", cov3dPtr[debugOffset+0])), \(String(format: "%.6f", cov3dPtr[debugOffset+1])), \(String(format: "%.6f", cov3dPtr[debugOffset+2])))")
+                print("      • quat: (\(String(format: "%.6f", cov3dPtr[debugOffset+3])), \(String(format: "%.6f", cov3dPtr[debugOffset+4])), \(String(format: "%.6f", cov3dPtr[debugOffset+5])), \(String(format: "%.6f", cov3dPtr[debugOffset+6])))")
+                print("      • S diag: (\(String(format: "%.6f", cov3dPtr[debugOffset+7])), \(String(format: "%.6f", cov3dPtr[debugOffset+8])), \(String(format: "%.6f", cov3dPtr[debugOffset+9])))")
+                print("      • R diag: (\(String(format: "%.6f", cov3dPtr[debugOffset+10])), \(String(format: "%.6f", cov3dPtr[debugOffset+11])), \(String(format: "%.6f", cov3dPtr[debugOffset+12])))")
+                print("      • M diag: (\(String(format: "%.6f", cov3dPtr[debugOffset+13])), \(String(format: "%.6f", cov3dPtr[debugOffset+14])), \(String(format: "%.6f", cov3dPtr[debugOffset+15])))")
+                print("      • tmp diag: (\(String(format: "%.6f", cov3dPtr[debugOffset+16])), \(String(format: "%.6f", cov3dPtr[debugOffset+17])), \(String(format: "%.6f", cov3dPtr[debugOffset+18])))")
+            }
+            print("   🔍 First Gaussian (idx 0) cov3d [magic numbers 888/999?]: [\(String(format: "%.1f", cov3dPtr[0])), \(String(format: "%.1f", cov3dPtr[1])), \(String(format: "%.1f", cov3dPtr[2])), \(String(format: "%.1f", cov3dPtr[3])), \(String(format: "%.1f", cov3dPtr[4])), \(String(format: "%.1f", cov3dPtr[5]))]")
+        } else {
+            print("   ⚠️ No successful Gaussians found!")
+        }
+
+        print("   🔍 DEBUG - First 5 Gaussian projection results:")
+        for i in 0..<min(5, numGaussians) {
+            let r = radiiPtr[i]
+            let d = depthsPtr[i]
+            let tiles = numTilesHitPtr[i]
+            print("      [\(i)] radius=\(r), depth=\(String(format: "%.3f", d)), tiles=\(tiles)")
+        }
+        
+        // Count how many have non-zero radii
+        var totalNonZero = 0
+        for i in 0..<numGaussians {
+            if radiiPtr[i] > 0 { totalNonZero += 1 }
+        }
+        print("   🔍 Gaussians with non-zero radius: \(totalNonZero)/\(numGaussians)")
+        
         // Count total intersections
         let numIntersects = try countIntersects(numTilesHit: stage1Outputs.numTilesHit, numPoints: numGaussians)
 
@@ -201,6 +290,11 @@ class OpenSplatRenderer {
             print("   ⚠️ No Gaussian intersections, skipping render")
             print("   🔍 This means ALL Gaussians failed projection (clipped, out of view, or zero radius)")
             return
+        }
+        
+        // Create new command buffer for remaining stages
+        guard let commandBuffer = commandQueue.makeCommandBuffer() else {
+            throw OpenSplatError.commandBufferCreationFailed
         }
 
         // STAGE 2: Map Gaussians to tiles and sort
@@ -244,6 +338,8 @@ class OpenSplatRenderer {
         let radii: MTLBuffer       // [N] radii in pixels
         let conics: MTLBuffer      // [N, 3] 2D conics (inverse covariance)
         let numTilesHit: MTLBuffer // [N] number of tiles hit by each Gaussian
+        let debugCounters: MTLBuffer // [5] debug counters for projection failures
+        let debugPipeline: MTLBuffer // [32] detailed pipeline debug for first Gaussian
     }
 
     private func projectGaussiansForward(
@@ -263,20 +359,39 @@ class OpenSplatRenderer {
         clipThreshold: Float
     ) throws -> ProjectGaussiansOutputs {
 
-        // Allocate output buffers
-        let cov3dSize = numPoints * 6 * MemoryLayout<Float>.stride
+        // Allocate output buffers (cov3d has extra space for debug data)
+        let cov3dSize = (numPoints * 6 + 32) * MemoryLayout<Float>.stride  // +32 floats for debug
         let xysSize = numPoints * 2 * MemoryLayout<Float>.stride
         let depthsSize = numPoints * MemoryLayout<Float>.stride
         let radiiSize = numPoints * MemoryLayout<Int32>.stride
         let conicsSize = numPoints * 3 * MemoryLayout<Float>.stride
         let numTilesHitSize = numPoints * MemoryLayout<Int32>.stride
 
-        guard let cov3d = device.makeBuffer(length: cov3dSize, options: .storageModePrivate),
-              let xys = device.makeBuffer(length: xysSize, options: .storageModePrivate),
-              let depths = device.makeBuffer(length: depthsSize, options: .storageModePrivate),
-              let radii = device.makeBuffer(length: radiiSize, options: .storageModePrivate),
-              let conics = device.makeBuffer(length: conicsSize, options: .storageModePrivate),
-              let numTilesHit = device.makeBuffer(length: numTilesHitSize, options: .storageModePrivate) else {
+        // Debug counters: [0]=processed, [1]=clipped, [2]=bad_cov, [3]=zero_tiles, [4]=success
+        let debugCountersSize = 5 * MemoryLayout<Int32>.stride
+        guard let debugCounters = device.makeBuffer(length: debugCountersSize, options: .storageModeShared) else {
+            throw OpenSplatError.bufferCreationFailed("debug counters")
+        }
+        // Zero out counters
+        memset(debugCounters.contents(), 0, debugCountersSize)
+
+        // Debug pipeline buffer for first Gaussian:
+        // [0-2]=world_pos, [3-5]=view_pos, [6-11]=cov3d, [12-14]=cov2d,
+        // [15]=det, [16]=radius, [17-19]=scale, [20-23]=quat, [24-27]=viewmat_col0
+        let debugPipelineSize = 32 * MemoryLayout<Float>.stride
+        guard let debugPipeline = device.makeBuffer(length: debugPipelineSize, options: .storageModeShared) else {
+            throw OpenSplatError.bufferCreationFailed("debug pipeline")
+        }
+        memset(debugPipeline.contents(), 0, debugPipelineSize)
+
+        // Use .storageModeShared for debugging (allows CPU readback)
+        // TODO: Change back to .storageModePrivate for performance after debugging
+        guard let cov3d = device.makeBuffer(length: cov3dSize, options: .storageModeShared),
+              let xys = device.makeBuffer(length: xysSize, options: .storageModeShared),
+              let depths = device.makeBuffer(length: depthsSize, options: .storageModeShared),
+              let radii = device.makeBuffer(length: radiiSize, options: .storageModeShared),
+              let conics = device.makeBuffer(length: conicsSize, options: .storageModeShared),
+              let numTilesHit = device.makeBuffer(length: numTilesHitSize, options: .storageModeShared) else {
             throw OpenSplatError.bufferCreationFailed("project_gaussians_forward outputs")
         }
 
@@ -293,6 +408,9 @@ class OpenSplatRenderer {
         var imgSize = SIMD2<UInt32>(UInt32(imgWidth), UInt32(imgHeight))
         var tileBoundsVar = tileBounds
         var clipThreshVar = clipThreshold
+        // After testing: DO NOT transpose! 
+        // The kernel reconstruction already handles column-major properly
+        // Original matrix gives geometrically correct view space Z values
         var viewMatVar = viewMatrix
         var projMatVar = projMatrix
 
@@ -313,6 +431,8 @@ class OpenSplatRenderer {
         encoder.setBuffer(radii, offset: 0, index: 14)
         encoder.setBuffer(conics, offset: 0, index: 15)
         encoder.setBuffer(numTilesHit, offset: 0, index: 16)
+        encoder.setBuffer(debugCounters, offset: 0, index: 17)
+        encoder.setBuffer(debugPipeline, offset: 0, index: 18)
 
         // Dispatch
         let threadsPerThreadgroup = min(
@@ -336,6 +456,12 @@ class OpenSplatRenderer {
         print("      • global_scale=\(globalScale)")
         print("      • tile_bounds=(\(tileBounds.x), \(tileBounds.y))")
         print("      • intrinsics: fx=\(fx), fy=\(fy), cx=\(cx), cy=\(cy)")
+        print("      • img_size: \(imgWidth) × \(imgHeight)")
+        
+        // Compute what OpenSplat will calculate
+        let tanFovX = 0.5 * Float(imgWidth) / fx
+        let tanFovY = 0.5 * Float(imgHeight) / fy
+        print("      • tan_fov computed: x=\(tanFovX), y=\(tanFovY)")
 
         return ProjectGaussiansOutputs(
             cov3d: cov3d,
@@ -343,7 +469,9 @@ class OpenSplatRenderer {
             depths: depths,
             radii: radii,
             conics: conics,
-            numTilesHit: numTilesHit
+            numTilesHit: numTilesHit,
+            debugCounters: debugCounters,
+            debugPipeline: debugPipeline
         )
     }
 
