@@ -167,21 +167,37 @@ public class SplatRenderer {
     var cameraWorldForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
 
     typealias IndexType = UInt32
-    // splatBuffer contains one entry for each gaussian splat
-    var splatBuffer: SplatMetalBuffer<Splat>
-    // splatBufferPrime is a copy of splatBuffer, which is not currenly in use for rendering.
-    // We use this for sorting, and when we're done, swap it with splatBuffer.
-    // There's a good chance that we'll sometimes end up sorting a splatBuffer still in use for
-    // rendering.
-    // TODO: Replace this with a more robust multiple-buffer scheme to guarantee we're never actively sorting a buffer still in use for rendering
-    var splatBufferPrime: SplatMetalBuffer<Splat>
 
-    var indexBuffer: SplatMetalBuffer<UInt32>
+    // Triple-buffer system for lock-free rendering and sorting
+    // - renderBuffer: Currently being used for rendering (read-only)
+    // - sortBuffer: Currently being sorted in background (write-only)
+    // - readyBuffer: Sorted and ready to become the next render buffer
+    private var bufferA: SplatMetalBuffer<Splat>!
+    private var bufferB: SplatMetalBuffer<Splat>!
+    private var bufferC: SplatMetalBuffer<Splat>!
 
-    public var splatCount: Int { splatBuffer.count }
+    private var renderBuffer: SplatMetalBuffer<Splat>!
+    private var sortBuffer: SplatMetalBuffer<Splat>!
+    private var readyBuffer: SplatMetalBuffer<Splat>!
+
+    // Synchronization
+    private let bufferSemaphore = DispatchSemaphore(value: 1)
+    private var renderInProgress = false
+
+    // Legacy compatibility
+    var splatBuffer: SplatMetalBuffer<Splat> { renderBuffer }
+    var indexBuffer: SplatMetalBuffer<UInt32>!
+
+    public var splatCount: Int { renderBuffer.count }
 
     public var sorting = false
     var orderAndDepthTempSort: [SplatIndexAndDepth] = []
+
+    // Sort throttling to prevent jitter
+    private var lastSortCameraPosition: SIMD3<Float> = .zero
+    private var lastSortCameraForward: SIMD3<Float> = .init(x: 0, y: 0, z: -1)
+    private let sortDistanceThreshold: Float = 0.1  // meters
+    private let sortAngleThreshold: Float = 0.996   // ~5 degrees (cos(5°))
 
     public init(device: MTLDevice,
                 colorFormat: MTLPixelFormat,
@@ -207,8 +223,20 @@ public class SplatRenderer {
         self.dynamicUniformBuffers.label = "Uniform Buffers"
         self.uniforms = UnsafeMutableRawPointer(dynamicUniformBuffers.contents()).bindMemory(to: UniformsArray.self, capacity: 1)
 
-        self.splatBuffer = try SplatMetalBuffer(device: device)
-        self.splatBufferPrime = try SplatMetalBuffer(device: device)
+        // Initialize triple-buffer system
+        self.bufferA = try SplatMetalBuffer(device: device)
+        self.bufferB = try SplatMetalBuffer(device: device)
+        self.bufferC = try SplatMetalBuffer(device: device)
+
+        self.bufferA.buffer.label = "Splat Buffer A"
+        self.bufferB.buffer.label = "Splat Buffer B"
+        self.bufferC.buffer.label = "Splat Buffer C"
+
+        // Initially assign buffers
+        self.renderBuffer = self.bufferA
+        self.sortBuffer = self.bufferB
+        self.readyBuffer = self.bufferC
+
         self.indexBuffer = try SplatMetalBuffer(device: device)
 
         do {
@@ -219,8 +247,19 @@ public class SplatRenderer {
     }
 
     public func reset() {
-        splatBuffer.count = 0
-        try? splatBuffer.setCapacity(0)
+        bufferSemaphore.wait()
+        defer { bufferSemaphore.signal() }
+
+        renderBuffer.count = 0
+        sortBuffer.count = 0
+        readyBuffer.count = 0
+
+        try? renderBuffer.setCapacity(0)
+        try? sortBuffer.setCapacity(0)
+        try? readyBuffer.setCapacity(0)
+
+        lastSortCameraPosition = .zero
+        lastSortCameraForward = .init(x: 0, y: 0, z: -1)
     }
 
     // File loading disabled - use direct buffer loading instead
@@ -410,9 +449,24 @@ public class SplatRenderer {
         cameraWorldPosition = viewports.map { Self.cameraWorldPosition(forViewMatrix: $0.viewMatrix) }.mean ?? .zero
         cameraWorldForward = viewports.map { Self.cameraWorldForward(forViewMatrix: $0.viewMatrix) }.mean?.normalized ?? .init(x: 0, y: 0, z: -1)
 
-        if !sorting {
-            resort()
-        }
+        // SORTING DISABLED for proof of concept
+        // Smart sorting: only resort when camera has moved significantly
+        // if !sorting && shouldResort() {
+        //     resort()
+        // }
+    }
+
+    /// Determines if we should resort based on camera movement
+    private func shouldResort() -> Bool {
+        // Calculate position change
+        let positionDelta = (cameraWorldPosition - lastSortCameraPosition).lengthSquared
+        let movedEnough = positionDelta > (sortDistanceThreshold * sortDistanceThreshold)
+
+        // Calculate rotation change (dot product of forward vectors)
+        let forwardDot = dot(cameraWorldForward, lastSortCameraForward)
+        let rotatedEnough = forwardDot < sortAngleThreshold
+
+        return movedEnough || rotatedEnough
     }
 
     private static func cameraWorldForward(forViewMatrix view: simd_float4x4) -> simd_float3 {
@@ -475,37 +529,11 @@ public class SplatRenderer {
         return renderEncoder
     }
 
-    public func render(viewports: [ViewportDescriptor],
-                       colorTexture: MTLTexture,
-                       colorStoreAction: MTLStoreAction,
-                       depthTexture: MTLTexture?,
-                       rasterizationRateMap: MTLRasterizationRateMap?,
-                       renderTargetArrayLength: Int,
-                       to commandBuffer: MTLCommandBuffer) throws {
-        let splatCount = splatBuffer.count
-        guard splatBuffer.count != 0 else { return }
-        let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
-        let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
-
-        switchToNextDynamicBuffer()
-        updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
-
-        let multiStage = useMultiStagePipeline
-        if multiStage {
-            try buildMultiStagePipelineStatesIfNeeded()
-        } else {
-            try buildSingleStagePipelineStatesIfNeeded()
-        }
-
-        let renderEncoder = renderEncoder(multiStage: multiStage,
-                                          viewports: viewports,
-                                          colorTexture: colorTexture,
-                                          colorStoreAction: colorStoreAction,
-                                          depthTexture: depthTexture,
-                                          rasterizationRateMap: rasterizationRateMap,
-                                          renderTargetArrayLength: renderTargetArrayLength,
-                                          for: commandBuffer)
-
+    private func renderWithEncoder(_ renderEncoder: MTLRenderCommandEncoder,
+                                   splatCount: Int,
+                                   indexedSplatCount: Int,
+                                   instanceCount: Int,
+                                   multiStage: Bool) {
         let indexCount = indexedSplatCount * 6
         if indexBuffer.count < indexCount {
             do {
@@ -547,7 +575,7 @@ public class SplatRenderer {
         }
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        renderEncoder.setVertexBuffer(renderBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
 
         renderEncoder.drawIndexedPrimitives(type: .triangle,
                                             indexCount: indexCount,
@@ -575,26 +603,81 @@ public class SplatRenderer {
         renderEncoder.endEncoding()
     }
 
-    // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
-    public func resort() {
-        guard !sorting else { 
-            print("⚠️ [SORT] Already sorting, skipping resort request")
-            return 
-        }
+    public func render(viewports: [ViewportDescriptor],
+                       colorTexture: MTLTexture,
+                       colorStoreAction: MTLStoreAction,
+                       depthTexture: MTLTexture?,
+                       rasterizationRateMap: MTLRasterizationRateMap?,
+                       renderTargetArrayLength: Int,
+                       to commandBuffer: MTLCommandBuffer) throws {
+        // SIMPLIFIED RENDER - No buffer swapping (sorting disabled)
+        let splatCount = renderBuffer.count
+        guard splatCount != 0 else { return }
+        let indexedSplatCount = min(splatCount, Constants.maxIndexedSplatCount)
+        let instanceCount = (splatCount + indexedSplatCount - 1) / indexedSplatCount
         
-        let splatCount = splatBuffer.count
+        // Mark rendering in progress
+        renderInProgress = true
+        commandBuffer.addCompletedHandler { [weak self] _ in
+            self?.renderInProgress = false
+        }
+
+        switchToNextDynamicBuffer()
+        updateUniforms(forViewports: viewports, splatCount: UInt32(splatCount), indexedSplatCount: UInt32(indexedSplatCount))
+
+        let multiStage = useMultiStagePipeline
+        if multiStage {
+            try buildMultiStagePipelineStatesIfNeeded()
+        } else {
+            try buildSingleStagePipelineStatesIfNeeded()
+        }
+
+        let renderEncoder = renderEncoder(multiStage: multiStage,
+                                          viewports: viewports,
+                                          colorTexture: colorTexture,
+                                          colorStoreAction: colorStoreAction,
+                                          depthTexture: depthTexture,
+                                          rasterizationRateMap: rasterizationRateMap,
+                                          renderTargetArrayLength: renderTargetArrayLength,
+                                          for: commandBuffer)
+
+        renderWithEncoder(renderEncoder,
+                        splatCount: splatCount,
+                        indexedSplatCount: indexedSplatCount,
+                        instanceCount: instanceCount,
+                        multiStage: multiStage)
+    }
+
+    // Triple-buffer resort: sorts into sortBuffer, then swaps with readyBuffer (never touches renderBuffer during sort)
+    public func resort() {
+        guard !sorting else {
+            print("⚠️ [SORT] Already sorting, skipping resort request")
+            return
+        }
+
+        // Lock the semaphore to access buffers
+        bufferSemaphore.wait()
+
+        let sourceBuffer = renderBuffer!  // Snapshot the current render buffer
+        let splatCount = sourceBuffer.count
+
         guard splatCount > 0 else {
+            bufferSemaphore.signal()
             print("⚠️ [SORT] No splats to sort (count = 0)")
             return
         }
-        
+
         print("🔄 [SORT] Starting resort for \(splatCount) splats")
         sorting = true
         onSortStart?()
         let sortStartTime = Date()
 
-        let cameraWorldForward = cameraWorldForward
-        let cameraWorldPosition = cameraWorldPosition
+        // Capture camera state
+        let sortCameraForward = cameraWorldForward
+        let sortCameraPosition = cameraWorldPosition
+
+        // Release semaphore before async work
+        bufferSemaphore.signal()
 
         Task(priority: .high) {
             defer {
@@ -605,17 +688,17 @@ public class SplatRenderer {
             }
 
             print("🔵 [SORT] Validating buffer state...")
-            
+
             // Validate buffer state before accessing
-            guard splatBuffer.capacity >= splatCount else {
-                print("❌ [SORT] Buffer capacity (\(splatBuffer.capacity)) < count (\(splatCount))")
+            guard sourceBuffer.capacity >= splatCount else {
+                print("❌ [SORT] Buffer capacity (\(sourceBuffer.capacity)) < count (\(splatCount))")
                 return
             }
-            
+
             // Test first few positions to detect corruption early
             let testCount = min(splatCount, 5)
             for i in 0..<testCount {
-                let position = splatBuffer.values[i].position
+                let position = sourceBuffer.values[i].position
                 if position.x.isNaN || position.y.isNaN || position.z.isNaN {
                     print("❌ [SORT] NaN detected in position[\(i)]: (\(position.x), \(position.y), \(position.z))")
                     return
@@ -633,18 +716,18 @@ public class SplatRenderer {
 
             let depthCalcStart = CFAbsoluteTimeGetCurrent()
             print("🔵 [SORT] Calculating depths (sortByDistance: \(Constants.sortByDistance), parallel: true)...")
-            
+
             // Parallelize depth calculation for better performance with large splat counts
             let chunkSize = max(1, splatCount / ProcessInfo.processInfo.activeProcessorCount)
-            
+
             if Constants.sortByDistance {
                 DispatchQueue.concurrentPerform(iterations: splatCount / chunkSize + (splatCount % chunkSize > 0 ? 1 : 0)) { chunkIndex in
                     let start = chunkIndex * chunkSize
                     let end = min(start + chunkSize, splatCount)
                     for i in start..<end {
                         orderAndDepthTempSort[i].index = UInt32(i)
-                        let splatPosition = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = (splatPosition - cameraWorldPosition).lengthSquared
+                        let splatPosition = sourceBuffer.values[i].position.simd
+                        orderAndDepthTempSort[i].depth = (splatPosition - sortCameraPosition).lengthSquared
                     }
                 }
             } else {
@@ -653,12 +736,12 @@ public class SplatRenderer {
                     let end = min(start + chunkSize, splatCount)
                     for i in start..<end {
                         orderAndDepthTempSort[i].index = UInt32(i)
-                        let splatPosition = splatBuffer.values[i].position.simd
-                        orderAndDepthTempSort[i].depth = dot(splatPosition, cameraWorldForward)
+                        let splatPosition = sourceBuffer.values[i].position.simd
+                        orderAndDepthTempSort[i].depth = dot(splatPosition, sortCameraForward)
                     }
                 }
             }
-            
+
             let depthCalcTime = CFAbsoluteTimeGetCurrent() - depthCalcStart
             print("✅ [SORT] Depth calculation: \(String(format: "%.1f", depthCalcTime * 1000))ms")
 
@@ -669,12 +752,17 @@ public class SplatRenderer {
             print("✅ [SORT] Array sort: \(String(format: "%.1f", sortTime * 1000))ms")
 
             let copyStart = CFAbsoluteTimeGetCurrent()
-            print("🔵 [SORT] Copying sorted results (parallel)...")
+            print("🔵 [SORT] Copying sorted results into sortBuffer (parallel)...")
+
+            // Lock semaphore to safely access sortBuffer
+            bufferSemaphore.wait()
+            defer { bufferSemaphore.signal() }
+
             do {
-                try splatBufferPrime.setCapacity(splatCount)
-                splatBufferPrime.count = splatCount  // Set count upfront for parallel writes
-                
-                // Parallel copy of sorted elements
+                try sortBuffer.setCapacity(splatCount)
+                sortBuffer.count = splatCount  // Set count upfront for parallel writes
+
+                // Parallel copy of sorted elements from sourceBuffer to sortBuffer
                 let copyChunkSize = max(1, splatCount / ProcessInfo.processInfo.activeProcessorCount)
                 DispatchQueue.concurrentPerform(iterations: splatCount / copyChunkSize + (splatCount % copyChunkSize > 0 ? 1 : 0)) { chunkIndex in
                     let start = chunkIndex * copyChunkSize
@@ -682,17 +770,23 @@ public class SplatRenderer {
                     for newIndex in start..<end {
                         let oldIndex = Int(orderAndDepthTempSort[newIndex].index)
                         if oldIndex < splatCount {
-                            splatBufferPrime.values[newIndex] = splatBuffer.values[oldIndex]
+                            sortBuffer.values[newIndex] = sourceBuffer.values[oldIndex]
                         }
                     }
                 }
-                
+
                 let copyTime = CFAbsoluteTimeGetCurrent() - copyStart
                 print("✅ [SORT] Buffer copy: \(String(format: "%.1f", copyTime * 1000))ms")
 
-                print("🔵 [SORT] Swapping buffers...")
-                swap(&splatBuffer, &splatBufferPrime)
-                print("✅ [SORT] Buffers swapped successfully")
+                // Atomic swap: sortBuffer <-> readyBuffer (renderBuffer is never touched)
+                print("🔵 [SORT] Swapping sortBuffer -> readyBuffer...")
+                swap(&sortBuffer, &readyBuffer)
+                print("✅ [SORT] Buffers swapped: readyBuffer now has \(readyBuffer.count) sorted splats")
+
+                // Update last sort position so we don't re-sort unnecessarily
+                lastSortCameraPosition = sortCameraPosition
+                lastSortCameraForward = sortCameraForward
+
             } catch {
                 print("❌ [SORT] Failed to copy sorted results: \(error)")
             }

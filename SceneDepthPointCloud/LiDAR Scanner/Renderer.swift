@@ -905,12 +905,12 @@ extension Renderer {
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             print("📋 [SYNC] GPU-synced \(currentGaussianCount) Gaussians (\(String(format: "%.1f", elapsed * 1000))ms)")
 
-            // Add a small delay to ensure GPU operations are fully complete before sorting
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
-                print("🔵 [SYNC] Triggering resort (with 10ms delay)...")
-                splatRenderer.resort()
-                print("✅ [SYNC] Resort triggered (async)")
-            }
+            // SORTING DISABLED for proof of concept
+            // Trigger resort immediately - the triple-buffer system ensures thread safety
+            // Resort will only execute if camera has moved significantly (smart throttling)
+            // print("🔵 [SYNC] Triggering resort...")
+            // splatRenderer.resort()
+            // print("✅ [SYNC] Resort triggered")
 
         } catch {
             print("❌ [SYNC] Failed to sync Gaussians to SplatRenderer: \(error)")

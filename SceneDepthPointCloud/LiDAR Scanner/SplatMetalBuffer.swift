@@ -58,8 +58,8 @@ class SplatMetalBuffer<T> {
     func setCapacity(_ newCapacity: Int) throws {
         let newCapacity = max(newCapacity, 1)
         guard newCapacity != capacity else { return }
-        guard capacity <= maxCapacity else {
-            throw Error.capacityGreatedThanMaxCapacity(requested: capacity, max: maxCapacity)
+        guard newCapacity <= maxCapacity else {
+            throw Error.capacityGreatedThanMaxCapacity(requested: newCapacity, max: maxCapacity)
         }
 
         log.info("Allocating a new buffer of size \(MemoryLayout<T>.stride) * \(newCapacity) = \(Float(MemoryLayout<T>.stride * newCapacity) / (1024.0 * 1024.0))mb")
