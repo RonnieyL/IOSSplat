@@ -132,7 +132,11 @@ vertex void unprojectVertexGaussian(uint vertexID [[vertex_id]],
     const auto confidence = confidenceTexture.sample(colorSampler, texCoord).r;
 
     // Compute covariance from scale and rotation
-    float3 scale = float3(0.01, 0.01, 0.01);  // Default small spherical Gaussian
+    // Scale gaussians based on depth: farther points get larger splats
+    // Base scale adjusted by depth for better coverage
+    float baseScale = 0.005;  // Smaller base for near objects
+    float depthScale = baseScale * (1.0 + depth * 2.0);  // Scale increases with depth
+    float3 scale = float3(depthScale, depthScale, depthScale);
     float4 rotation = float4(0, 0, 0, 1);     // Identity quaternion (no rotation)
 
     half3 covA, covB;
