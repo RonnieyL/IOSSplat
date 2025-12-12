@@ -401,7 +401,7 @@ final class PromptDAEngine {
         // Step 1: Pre-blur with Gaussian (σ=1.0) to reduce noise before Laplacian
         // This prevents the Laplacian from being overly sensitive to high-frequency noise
         let blurred = gray.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.0])
-        print("      → Applied pre-Gaussian blur (σ=1.0)") 
+        print("      → Applied pre-Gaussian blur (σ=1.0)")
 
         // Step 2: Apply Laplacian to smoothed image (true Laplacian of Gaussian)
         let lap = blurred.clampedToExtent().applyingFilter("CIConvolution3X3", parameters: [
@@ -581,46 +581,6 @@ final class PromptDAEngine {
 
         return smoothedBuffer
     }
-
-    private func makeNewLoGProbability(from rgb: CIImage, size: CGSize) throws -> CVPixelBuffer {
-
-        // Convert to grayscale and resize for running the Laplacian
-        let gray = rgb.toGray().lanczosTo(size)
-
-        // Apply Laplacian filter
-        let lap = gray.clampedToExtent().applyingFilter("CIConvolution3X3", parameters: [
-            "inputWeights": CIVector(values: [
-                0,  1, 0,
-                1, -4, 1,
-                0,  1, 0
-            ], count: 9),
-            "inputBias": 0
-        ]).cropped(to: gray.extent)
-
-        // Remove edges by cropping pixels from each side
-        let removalBorder: CGFloat = 2
-        let cropped = lap.cropped(to: CGRect(x: removalBorder, y: removalBorder, width: size.width - 2 * removalBorder, height: size.height - 2 * removalBorder))
-
-        // Taking absolute value of the Laplacian response
-        let absLaplacian = cropped.applyingFilter("CIAbsoluteDifference", parameters: [
-            "inputImage2": CIImage(color: .black).cropped(to: cropped.extent)
-        ])
-
-        // Apply Gaussian blur to the absolute Laplacian
-        let blurred = absLaplacian.applyingFilter("CIGaussianBlur", parameters: [
-            "inputRadius": 1.0
-        ])
-
-        // Clamping to [0, 1]
-        let clamped = blurred.applyingFilter("CIColorClamp", parameters: [
-            "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-            "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
-        ])
-
-        return clamped.toPixelBuffer(context: ctx, pixelFormat: kCVPixelFormatType_OneComponent32Float, size: size)
-    }
-    
-    
 }
 
 private extension CIImage {
@@ -629,14 +589,6 @@ private extension CIImage {
             "inputRVector": CIVector(x: 0.299, y: 0,      z: 0,      w: 0),
             "inputGVector": CIVector(x: 0,      y: 0.587, z: 0,      w: 0),
             "inputBVector": CIVector(x: 0,      y: 0,      z: 0.114, w: 0),
-            "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
-        ])
-    }
-    func toGray() -> CIImage {
-        applyingFilter("CIColorMatrix", parameters: [
-            "inputRVector": CIVector(x: 1, y: 0,      z: 0,      w: 0),
-            "inputGVector": CIVector(x: 0,      y: 1, z: 0,      w: 0),
-            "inputBVector": CIVector(x: 0,      y: 0,      z: 1, w: 0),
             "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
         ])
     }

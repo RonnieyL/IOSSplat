@@ -453,10 +453,10 @@ final class Renderer {
             print("   • PromptDA output depth: \(depthW)×\(depthH)")
             print("   • LoG probability map: \(probW)×\(probH)")
             
-            // Use Bernoulli sampling for intelligent point placement (stochastic sample count)
-            let pixels = ProbabilitySampler.samplePixelsBernoulli(probPB: output.probPB, scale: 2)
+            // Use LoG probability sampling for intelligent point placement
+            let pixels = ProbabilitySampler.samplePixels(probPB: output.probPB, count: numGridPoints, unique: true)
             
-            print("   • Sampled \(pixels.count) points from LoG probability distribution (Bernoulli)")
+            print("   • Sampled \(pixels.count) points from LoG probability distribution")
             
             // Convert probability samples from PromptDA resolution to camera resolution
             // PromptDA outputs at 518×518, but camera is 1920×1440
