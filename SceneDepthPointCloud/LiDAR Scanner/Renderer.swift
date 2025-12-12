@@ -106,7 +106,7 @@ final class Renderer {
     // OpenSplat Renderer (new, advanced tile-based)
     private var openSplatRenderer: OpenSplatRenderer?
     var isGaussianSplattingEnabled = true  // Enable by default for testing
-    var useOpenSplatRenderer = true  // Toggle for migration - ENABLED FOR TESTING
+    var useOpenSplatRenderer = false  // Toggle for migration - DISABLED (using MetalSplatter)
 
     // Debug tracking for splatting pipeline
     private var splatRenderFrameCount: Int = 0
@@ -620,6 +620,57 @@ final class Renderer {
                     let metalSplatterViewSpace = viewMatrix * firstGaussianHomo
                     print("   🔍 MetalSplatter view space Z: \(String(format: "%.3f", metalSplatterViewSpace.z))")
                     print("   🔍 MetalSplatter uses SAME viewMatrix as OpenSplat")
+                }
+
+                // DEBUG: Check for size mismatch between viewport and texture
+                if shouldPrintDebug {
+                    print("🔍 VIEWPORT DEBUG:")
+                    print("   • viewportSize: \(Int(viewportSize.width))×\(Int(viewportSize.height))")
+                    print("   • drawable.texture size: \(drawable.texture.width)×\(drawable.texture.height)")
+                    if Int(viewportSize.width) != drawable.texture.width || Int(viewportSize.height) != drawable.texture.height {
+                        print("   ⚠️ SIZE MISMATCH! This causes projection errors!")
+                    }
+
+                    // Check actual Gaussian positions and their projections
+                    if let meansBuffer = self.gaussianMeansBuffer, self.currentGaussianCount > 0 {
+                        let meansPtr = meansBuffer.contents().bindMemory(to: SIMD3<Float>.self, capacity: maxGaussians)
+                        print("\n🔍 GAUSSIAN POSITION DEBUG (first 5):")
+                        for i in 0..<min(5, self.currentGaussianCount) {
+                            let worldPos = meansPtr[i]
+                            let worldPosHomo = SIMD4<Float>(worldPos.x, worldPos.y, worldPos.z, 1.0)
+
+                            // Transform to view space
+                            let viewPos = viewMatrix * worldPosHomo
+
+                            // Project to clip space
+                            let clipPos = projectionMatrix * viewPos
+
+                            // Normalize to NDC (-1 to 1)
+                            let ndc = SIMD3<Float>(clipPos.x / clipPos.w, clipPos.y / clipPos.w, clipPos.z / clipPos.w)
+
+                            // Convert to screen space (0 to width/height)
+                            let screenX = (ndc.x + 1.0) * 0.5 * Float(viewportSize.width)
+                            let screenY = (1.0 - ndc.y) * 0.5 * Float(viewportSize.height)  // Flip Y for screen coords
+
+                            print("   [\(i)] world: (\(String(format: "%.2f", worldPos.x)), \(String(format: "%.2f", worldPos.y)), \(String(format: "%.2f", worldPos.z)))")
+                            print("       view: Z=\(String(format: "%.2f", viewPos.z)) | screen: (\(String(format: "%.0f", screenX)), \(String(format: "%.0f", screenY)))")
+                        }
+
+                        // Check Y distribution of all Gaussians
+                        var yMin: Float = .infinity
+                        var yMax: Float = -.infinity
+                        var ySum: Float = 0
+                        for i in 0..<self.currentGaussianCount {
+                            let y = meansPtr[i].y
+                            yMin = min(yMin, y)
+                            yMax = max(yMax, y)
+                            ySum += y
+                        }
+                        let yAvg = ySum / Float(self.currentGaussianCount)
+                        print("\n   📊 Y-coordinate distribution:")
+                        print("      • Min: \(String(format: "%.2f", yMin)), Max: \(String(format: "%.2f", yMax)), Avg: \(String(format: "%.2f", yAvg))")
+                        print("      • Camera Y: \(String(format: "%.2f", currentFrame.camera.transform.columns.3.y))")
+                    }
                 }
 
                 splatting.draw(commandBuffer: commandBuffer,
